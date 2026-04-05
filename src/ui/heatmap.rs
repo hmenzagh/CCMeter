@@ -273,6 +273,7 @@ fn render_trend_line(frame: &mut Frame, area: Rect, raw_values: &[f64], accent: 
     frame.render_widget(chart, area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_one(
     frame: &mut Frame,
     area: Rect,
