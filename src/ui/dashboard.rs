@@ -218,6 +218,8 @@ impl App {
                 _ => unreachable!(),
             };
             heatmap::render_intraday(frame, chunks[0], &self.data.minute_tokens, mode, anim_tick);
+        } else if self.time_filter == TimeFilter::LastWeek {
+            heatmap::render_weekly(frame, chunks[0], &self.data.minute_tokens, anim_tick);
         } else {
             heatmap::render(
                 frame,
@@ -225,6 +227,7 @@ impl App {
                 &self.render.filtered,
                 &self.data.thresholds,
                 anim_tick,
+                self.render.range,
             );
         }
 

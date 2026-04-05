@@ -109,6 +109,7 @@ pub fn render(
     daily: &DailyTokens,
     thresholds: &Thresholds,
     tick: usize,
+    range: (NaiveDate, NaiveDate),
 ) {
     let (grid_cols, grid_rows) = compute_grid(area.width, area.height);
     if grid_cols == 0 || grid_rows == 0 {
@@ -174,7 +175,7 @@ pub fn render(
         for col_area in col_areas.iter() {
             if idx < num_panels {
                 let (title, data, thresh, colors) = &panels[idx];
-                render_one(frame, *col_area, title, data, thresh, colors, tick);
+                render_one(frame, *col_area, title, data, thresh, colors, tick, range);
                 idx += 1;
             }
         }
@@ -280,6 +281,7 @@ fn render_one(
     thresholds: &[u64; 4],
     colors: &[Color; 5],
     tick: usize,
+    range: (NaiveDate, NaiveDate),
 ) {
     if area.height < HEATMAP_HEIGHT || area.width < 20 {
         return;
@@ -307,7 +309,12 @@ fn render_one(
     let label_cols: u16 = 5;
     let cell_w: u16 = 2;
     let grid_width = inner.width.saturating_sub(label_cols);
-    let num_weeks = (grid_width / cell_w) as usize;
+    let max_screen_weeks = (grid_width / cell_w) as usize;
+
+    // Cap weeks to the time-filter range (+ partial week on each side)
+    let range_days = (range.1 - range.0).num_days().max(0) as usize + 1;
+    let max_range_weeks = (range_days + 6) / 7 + 1; // round up + 1 for partial week alignment
+    let num_weeks = max_screen_weeks.min(max_range_weeks);
     if num_weeks == 0 {
         return;
     }
@@ -785,6 +792,287 @@ fn render_intraday_one(
     }
 
     let sep_y = inner.y + 1 + INTRADAY_ROWS as u16;
+    render_scanner_separator(
+        frame,
+        inner.x,
+        sep_y,
+        inner.width,
+        inner.y + inner.height,
+        colors[4],
+        tick,
+    );
+
+    let trend_y = sep_y + 1;
+    let trend_h = (inner.y + inner.height).saturating_sub(trend_y);
+    if trend_h >= 2 && active > 0 {
+        let raw: Vec<f64> = buckets[..active].iter().map(|&v| v as f64).collect();
+        render_trend_line(
+            frame,
+            Rect::new(inner.x, trend_y, inner.width, trend_h),
+            &raw,
+            colors[4],
+        );
+    }
+}
+
+// === Weekly (days × hours) heatmap ===
+
+const WEEKLY_ROWS: usize = 6;
+const WEEKLY_BUCKET_HOURS: usize = 4;
+const WEEKLY_ROW_LABELS: [&str; 6] = ["0h", "4h", "8h", "12h", "16h", "20h"];
+
+/// Aggregate minute-level data into 4-hour buckets for the last 7 days.
+fn extract_weekly_buckets(
+    data: &HashMap<(NaiveDate, u16), u64>,
+    start_date: NaiveDate,
+) -> Vec<u64> {
+    // 7 days × 6 four-hour blocks = 42 buckets
+    // Layout: bucket index = day * WEEKLY_ROWS + row
+    let mut buckets = vec![0u64; 7 * WEEKLY_ROWS];
+    for day in 0..7 {
+        let date = start_date + chrono::Duration::days(day as i64);
+        for row in 0..WEEKLY_ROWS {
+            let hour_start = row * WEEKLY_BUCKET_HOURS;
+            let minute_start = (hour_start * 60) as u16;
+            let minute_end = minute_start + (WEEKLY_BUCKET_HOURS * 60) as u16;
+            let bi = day * WEEKLY_ROWS + row;
+            for m in minute_start..minute_end {
+                if let Some(&val) = data.get(&(date, m)) {
+                    buckets[bi] += val;
+                }
+            }
+        }
+    }
+    buckets
+}
+
+fn build_weekly_col_labels(start_date: NaiveDate) -> Vec<String> {
+    (0..7)
+        .map(|i| {
+            let d = start_date + chrono::Duration::days(i as i64);
+            match d.weekday() {
+                chrono::Weekday::Mon => "Mo",
+                chrono::Weekday::Tue => "Tu",
+                chrono::Weekday::Wed => "We",
+                chrono::Weekday::Thu => "Th",
+                chrono::Weekday::Fri => "Fr",
+                chrono::Weekday::Sat => "Sa",
+                chrono::Weekday::Sun => "Su",
+            }
+            .to_string()
+        })
+        .collect()
+}
+
+pub fn render_weekly(
+    frame: &mut Frame,
+    area: Rect,
+    minute_data: &MinuteTokens,
+    tick: usize,
+) {
+    let (grid_cols, grid_rows) = compute_grid(area.width, area.height);
+    if grid_cols == 0 || grid_rows == 0 {
+        return;
+    }
+
+    let t = theme();
+    let today = Local::now().date_naive();
+    let start_date = today - chrono::Duration::days(6);
+
+    let input_b = extract_weekly_buckets(&minute_data.input, start_date);
+    let output_b = extract_weekly_buckets(&minute_data.output, start_date);
+    let lines_b = extract_weekly_buckets(&minute_data.lines_accepted, start_date);
+    let sug_b = extract_weekly_buckets(&minute_data.lines_suggested, start_date);
+
+    let now = Local::now().naive_local();
+    let today_col = 6usize; // last column is today
+    let current_hour = now.hour() as usize;
+    let current_row = current_hour / WEEKLY_BUCKET_HOURS;
+    let active = today_col * WEEKLY_ROWS + current_row + 1;
+
+    let rate_b: Vec<u64> = lines_b
+        .iter()
+        .zip(sug_b.iter())
+        .map(|(&a, &s)| {
+            if s > 0 {
+                ((a as f64 / s as f64) * 100.0).min(100.0) as u64
+            } else {
+                0
+            }
+        })
+        .collect();
+
+    let active_end = active.min(input_b.len());
+    let input_t = compute_thresholds_from_slice(&input_b[..active_end]);
+    let output_t = compute_thresholds_from_slice(&output_b[..active_end]);
+    let lines_t = compute_thresholds_from_slice(&lines_b[..active_end]);
+
+    let input_total: u64 = input_b[..active_end].iter().sum();
+    let output_total: u64 = output_b[..active_end].iter().sum();
+    let lines_total: u64 = lines_b[..active_end].iter().sum();
+    let sug_total: u64 = sug_b[..active_end].iter().sum();
+    let rate = if sug_total > 0 {
+        (lines_total as f64 / sug_total as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+
+    let input_title = format!(" Input {} ", format_tokens(input_total));
+    let output_title = format!(" Output {} ", format_tokens(output_total));
+    let lines_title = format!(" Lines {} ", format_tokens(lines_total));
+    let rate_title = format!(" Accept {:.0}% ", rate);
+
+    let col_labels = build_weekly_col_labels(start_date);
+
+    let num_panels = (grid_cols * grid_rows).min(4) as usize;
+
+    let row_constraints: Vec<Constraint> = (0..grid_rows)
+        .map(|_| Constraint::Length(HEATMAP_HEIGHT))
+        .collect();
+    let row_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(row_constraints)
+        .split(area);
+
+    #[allow(clippy::type_complexity)]
+    let panel_data: [(&str, &[u64], &[u64; 4], &[Color; 5]); 4] = [
+        (&input_title, &input_b, &input_t, &t.input_colors),
+        (&output_title, &output_b, &output_t, &t.output_colors),
+        (&lines_title, &lines_b, &lines_t, &t.lines_colors),
+        (&rate_title, &rate_b, &RATE_THRESHOLDS, &t.rate_colors),
+    ];
+
+    let mut idx = 0usize;
+    for row_area in row_areas.iter() {
+        let col_constraints: Vec<Constraint> = (0..grid_cols)
+            .map(|_| Constraint::Ratio(1, grid_cols as u32))
+            .collect();
+        let col_areas = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(col_constraints)
+            .split(*row_area);
+
+        for col_area in col_areas.iter() {
+            if idx < num_panels {
+                let (title, data, thresh, colors) = &panel_data[idx];
+                render_weekly_one(
+                    frame,
+                    *col_area,
+                    title,
+                    data,
+                    active,
+                    &col_labels,
+                    thresh,
+                    colors,
+                    tick,
+                );
+                idx += 1;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_weekly_one(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    buckets: &[u64],
+    active: usize,
+    col_labels: &[String],
+    thresholds: &[u64; 4],
+    colors: &[Color; 5],
+    tick: usize,
+) {
+    if area.height < HEATMAP_HEIGHT || area.width < 12 {
+        return;
+    }
+
+    let t = theme();
+
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(t.heatmap_title)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(t.border));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let label_cols: u16 = 4;
+    let grid_width = inner.width.saturating_sub(label_cols);
+    let cell_w: u16 = if grid_width / 2 >= 7 { 2 } else { 1 };
+    let num_cols = (grid_width / cell_w).min(7) as usize;
+    if num_cols == 0 {
+        return;
+    }
+
+    let col_offset = 7usize.saturating_sub(num_cols);
+
+    let total_grid_w = label_cols + num_cols as u16 * cell_w;
+    let left_pad = (inner.width.saturating_sub(total_grid_w)) / 2;
+    let gx = inner.x + left_pad;
+
+    let end = (col_offset + num_cols).min(col_labels.len());
+    let visible_labels: Vec<&str> = col_labels[col_offset..end]
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    render_intraday_col_labels(
+        frame,
+        gx,
+        inner.y,
+        total_grid_w,
+        label_cols,
+        cell_w,
+        &visible_labels,
+    );
+
+    let buf = frame.buffer_mut();
+    for (row, label) in WEEKLY_ROW_LABELS.iter().enumerate().take(WEEKLY_ROWS) {
+        let y = inner.y + 1 + row as u16;
+        if y >= inner.y + inner.height || y >= buf.area().bottom() {
+            break;
+        }
+
+        for (ci, ch) in label.chars().enumerate() {
+            let cx = gx + ci as u16;
+            if cx < buf.area().right() {
+                let cell = &mut buf[(cx, y)];
+                cell.set_char(ch);
+                cell.set_fg(t.heatmap_label);
+            }
+        }
+
+        for col in 0..num_cols {
+            let actual_col = col_offset + col;
+            let bi = actual_col * WEEKLY_ROWS + row;
+            let cx = gx + label_cols + (col as u16) * cell_w;
+            if cx >= buf.area().right() {
+                break;
+            }
+            if bi >= buckets.len() || bi >= active {
+                // future — leave blank
+            } else {
+                let val = buckets[bi];
+                let cell = &mut buf[(cx, y)];
+                if val == 0 {
+                    cell.set_symbol("\u{00b7}");
+                    cell.set_fg(t.dot_empty);
+                } else {
+                    let level = token_level(val, thresholds);
+                    cell.set_symbol("\u{2580}");
+                    cell.set_fg(colors[level]);
+                }
+            }
+        }
+    }
+
+    let sep_y = inner.y + 1 + WEEKLY_ROWS as u16;
     render_scanner_separator(
         frame,
         inner.x,
