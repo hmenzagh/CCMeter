@@ -1,0 +1,44 @@
+<svg viewBox="0 0 140 140" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="18" y="22" width="13" height="13" rx="2" fill="#052e16"/>
+  <rect x="33" y="22" width="13" height="13" rx="2" fill="#14532d"/>
+  <rect x="48" y="22" width="13" height="13" rx="2" fill="#052e16"/>
+  <rect x="63" y="22" width="13" height="13" rx="2" fill="#166534"/>
+  <rect x="78" y="22" width="13" height="13" rx="2" fill="#14532d"/>
+  <rect x="93" y="22" width="13" height="13" rx="2" fill="#052e16"/>
+  <rect x="108" y="22" width="13" height="13" rx="2" fill="#14532d"/>
+
+  <rect x="18" y="37" width="13" height="13" rx="2" fill="#14532d"/>
+  <rect x="33" y="37" width="13" height="13" rx="2" fill="#22c55e"/>
+  <rect x="48" y="37" width="13" height="13" rx="2" fill="#166534"/>
+  <rect x="63" y="37" width="13" height="13" rx="2" fill="#4ade80"/>
+  <rect x="78" y="37" width="13" height="13" rx="2" fill="#86efac"/>
+  <rect x="93" y="37" width="13" height="13" rx="2" fill="#166534"/>
+  <rect x="108" y="37" width="13" height="13" rx="2" fill="#052e16"/>
+
+  <rect x="18" y="52" width="13" height="13" rx="2" fill="#166534"/>
+  <rect x="33" y="52" width="13" height="13" rx="2" fill="#86efac"/>
+  <rect x="48" y="52" width="13" height="13" rx="2" fill="#bbf7d0"/>
+  <rect x="63" y="52" width="13" height="13" rx="2" fill="#bbf7d0"/>
+  <rect x="78" y="52" width="13" height="13" rx="2" fill="#86efac"/>
+  <rect x="93" y="52" width="13" height="13" rx="2" fill="#4ade80"/>
+  <rect x="108" y="52" width="13" height="13" rx="2" fill="#14532d"/>
+
+  <rect x="18" y="67" width="13" height="13" rx="2" fill="#14532d"/>
+  <rect x="33" y="67" width="13" height="13" rx="2" fill="#4ade80"/>
+  <rect x="48" y="67" width="13" height="13" rx="2" fill="#86efac"/>
+  <rect x="63" y="67" width="13" height="13" rx="2" fill="#22c55e"/>
+  <rect x="78" y="67" width="13" height="13" rx="2" fill="#bbf7d0"/>
+  <rect x="93" y="67" width="13" height="13" rx="2" fill="#22c55e"/>
+  <rect x="108" y="67" width="13" height="13" rx="2" fill="#166534"/>
+
+  <rect x="18" y="82" width="13" height="13" rx="2" fill="#052e16"/>
+  <rect x="33" y="82" width="13" height="13" rx="2" fill="#166534"/>
+  <rect x="48" y="82" width="13" height="13" rx="2" fill="#22c55e"/>
+  <rect x="63" y="82" width="13" height="13" rx="2" fill="#166534"/>
+  <rect x="78" y="82" width="13" height="13" rx="2" fill="#4ade80"/>
+  <rect x="93" y="82" width="13" height="13" rx="2" fill="#14532d"/>
+  <rect x="108" y="82" width="13" height="13" rx="2" fill="#052e16"/>
+
+  <text x="70" y="114" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="14" fill="#4ade80" font-weight="700">CCMeter</text>
+  <text x="70" y="128" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="6" fill="#22c55e" letter-spacing="3" opacity=".6">CLAUDE CODE METRICS</text>
+</svg>
