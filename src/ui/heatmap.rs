@@ -710,7 +710,7 @@ fn render_intraday_one(
     let label_cols: u16 = 4;
     let grid_width = inner.width.saturating_sub(label_cols);
     let max_cols = mode.max_cols() as u16;
-    let cell_w: u16 = if grid_width / 2 >= max_cols { 2 } else { 1 };
+    let cell_w: u16 = 2;
     let num_cols = (grid_width / cell_w).min(max_cols) as usize;
     if num_cols == 0 {
         return;
