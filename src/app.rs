@@ -273,20 +273,23 @@ impl App {
             return false;
         }
 
-        match key.code {
-            KeyCode::Tab => {
-                self.time_filter = self.time_filter.next();
-                self.card_scroll = 0;
-                self.render_dirty = true;
-                return true;
+        // Tab/BackTab cycle time filters globally, except in Settings where Tab switches tabs.
+        if !matches!(self.view, View::Settings(_)) {
+            match key.code {
+                KeyCode::Tab => {
+                    self.time_filter = self.time_filter.next();
+                    self.card_scroll = 0;
+                    self.render_dirty = true;
+                    return true;
+                }
+                KeyCode::BackTab => {
+                    self.source_index = (self.source_index + 1) % self.config.source_names.len();
+                    self.card_scroll = 0;
+                    self.recompute_tokens();
+                    return true;
+                }
+                _ => {}
             }
-            KeyCode::BackTab => {
-                self.source_index = (self.source_index + 1) % self.config.source_names.len();
-                self.card_scroll = 0;
-                self.recompute_tokens();
-                return true;
-            }
-            _ => {}
         }
 
         match &mut self.view {
@@ -343,6 +346,7 @@ impl App {
                     KeyResult::Rebuild => {
                         let selected = state.selected;
                         let tick = state.tick;
+                        let tab = state.tab_index();
                         self.config.groups = overrides::apply_overrides(
                             &self.config.raw_groups,
                             &mut self.config.overrides,
@@ -353,7 +357,7 @@ impl App {
                             self.project_index = None;
                         }
                         let mut new_state =
-                            SettingsState::with_selected(&self.config.groups, selected);
+                            SettingsState::with_selected(&self.config.groups, selected, Some(tab));
                         new_state.tick = tick;
                         self.view = View::Settings(Box::new(new_state));
                         self.render_dirty = true;

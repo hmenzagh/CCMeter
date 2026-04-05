@@ -28,15 +28,29 @@ impl App {
 
         self.draw_footer(frame, outer[2]);
 
-        let top_cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(30),
-                Constraint::Percentage(40),
-                Constraint::Percentage(30),
-            ])
-            .split(outer[0]);
-        self.draw_header(frame, &top_cols);
+        // Replace time-filter / source tabs with a plain title in settings view
+        if matches!(self.view, View::Settings(_)) {
+            let t = theme();
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " Settings",
+                    Style::default()
+                        .fg(t.heatmap_title)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                outer[0],
+            );
+        } else {
+            let top_cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(30),
+                ])
+                .split(outer[0]);
+            self.draw_header(frame, &top_cols);
+        }
 
         let content_area = outer[1];
         const MIN_WIDTH: u16 = 50;
@@ -210,6 +224,7 @@ impl App {
             .split(inner);
 
         let anim_tick = (self.start_time.elapsed().as_millis() / 80) as usize;
+        let expanded = self.config.overrides.display.expanded_heatmap;
         if self.time_filter.is_intraday() {
             let mode = match self.time_filter {
                 TimeFilter::Hour1 => heatmap::IntradayMode::Hour1,
@@ -217,14 +232,21 @@ impl App {
                 TimeFilter::Today => heatmap::IntradayMode::Today,
                 _ => unreachable!(),
             };
-            heatmap::render_intraday(frame, chunks[0], &self.data.minute_tokens, mode, anim_tick);
+            heatmap::render_intraday(
+                frame,
+                chunks[0],
+                &self.data.minute_tokens,
+                mode,
+                anim_tick,
+                expanded,
+            );
         } else if self.time_filter == TimeFilter::LastWeek {
             heatmap::render_weekly(
                 frame,
                 chunks[0],
                 &self.data.minute_tokens,
-                self.render.range,
                 anim_tick,
+                expanded,
             );
         } else {
             heatmap::render(
@@ -234,6 +256,7 @@ impl App {
                 &self.data.thresholds,
                 anim_tick,
                 self.render.range,
+                expanded,
             );
         }
 

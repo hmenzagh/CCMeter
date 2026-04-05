@@ -68,6 +68,27 @@ pub fn compute_thresholds(daily: &HashMap<NaiveDate, u64>) -> [u64; 4] {
     quartile_thresholds(&mut values)
 }
 
+/// Fill `width` consecutive buffer cells at (x, y) with the same symbol and color.
+fn fill_cell(
+    buf: &mut ratatui::buffer::Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    symbol: &str,
+    fg: Color,
+) {
+    let right = buf.area().right();
+    for dx in 0..width {
+        let cx = x + dx;
+        if cx >= right {
+            break;
+        }
+        let cell = &mut buf[(cx, y)];
+        cell.set_symbol(symbol);
+        cell.set_fg(fg);
+    }
+}
+
 fn token_level(value: u64, thresholds: &[u64; 4]) -> usize {
     if value == 0 {
         return 0;
@@ -110,6 +131,7 @@ pub fn render(
     thresholds: &Thresholds,
     tick: usize,
     range: (NaiveDate, NaiveDate),
+    expanded: bool,
 ) {
     let (grid_cols, grid_rows) = compute_grid(area.width, area.height);
     if grid_cols == 0 || grid_rows == 0 {
@@ -175,7 +197,9 @@ pub fn render(
         for col_area in col_areas.iter() {
             if idx < num_panels {
                 let (title, data, thresh, colors) = &panels[idx];
-                render_one(frame, *col_area, title, data, thresh, colors, tick, range);
+                render_one(
+                    frame, *col_area, title, data, thresh, colors, tick, range, expanded,
+                );
                 idx += 1;
             }
         }
@@ -283,6 +307,7 @@ fn render_one(
     colors: &[Color; 5],
     tick: usize,
     range: (NaiveDate, NaiveDate),
+    expanded: bool,
 ) {
     if area.height < HEATMAP_HEIGHT || area.width < 20 {
         return;
@@ -308,18 +333,23 @@ fn render_one(
     frame.render_widget(block, area);
 
     let label_cols: u16 = 5;
-    let cell_w: u16 = 2;
     let grid_width = inner.width.saturating_sub(label_cols);
-    let max_screen_weeks = (grid_width / cell_w) as usize;
 
     // Cap weeks to the time-filter range (+ partial week on each side)
     let range_days = (range.1 - range.0).num_days().max(0) as usize + 1;
-    let max_range_weeks = range_days.div_ceil(7) + 1; // round up + 1 for partial week alignment
+    let max_range_weeks = range_days.div_ceil(7) + 1; // +1 for partial week at boundary
+    let max_screen_weeks = (grid_width / 2) as usize; // minimum cell_w of 2
     let num_weeks = max_screen_weeks.min(max_range_weeks);
     if num_weeks == 0 {
         return;
     }
 
+    // Expanded: scale cells to fill panel width; compact: fixed 2-char cells
+    let cell_w: u16 = if expanded {
+        (grid_width / num_weeks as u16).max(2)
+    } else {
+        2
+    };
     let total_grid_w = label_cols + num_weeks as u16 * cell_w;
     let left_pad = (inner.width.saturating_sub(total_grid_w)) / 2;
     let gx = inner.x + left_pad;
@@ -365,16 +395,13 @@ fn render_one(
             if date > today {
                 // leave blank (buffer is already cleared)
             } else {
-                let cell = &mut buf[(cx, y)];
                 match daily_tokens.get(&date) {
                     None => {
-                        cell.set_symbol("·");
-                        cell.set_fg(t.dot_empty);
+                        fill_cell(buf, cx, y, cell_w, "\u{00b7}", t.dot_empty);
                     }
                     Some(&val) => {
                         let level = token_level(val, thresholds);
-                        cell.set_symbol("\u{2580}");
-                        cell.set_fg(colors[level]);
+                        fill_cell(buf, cx, y, cell_w, "\u{2580}", colors[level]);
                     }
                 }
             }
@@ -558,6 +585,7 @@ pub fn render_intraday(
     minute_data: &MinuteTokens,
     mode: IntradayMode,
     tick: usize,
+    expanded: bool,
 ) {
     let (grid_cols, grid_rows) = compute_grid(area.width, area.height);
     if grid_cols == 0 || grid_rows == 0 {
@@ -667,6 +695,7 @@ pub fn render_intraday(
                     thresh,
                     colors,
                     tick,
+                    expanded,
                 );
                 idx += 1;
             }
@@ -687,6 +716,7 @@ fn render_intraday_one(
     thresholds: &[u64; 4],
     colors: &[Color; 5],
     tick: usize,
+    expanded: bool,
 ) {
     if area.height < HEATMAP_HEIGHT || area.width < 12 {
         return;
@@ -710,11 +740,19 @@ fn render_intraday_one(
     let label_cols: u16 = 4;
     let grid_width = inner.width.saturating_sub(label_cols);
     let max_cols = mode.max_cols() as u16;
-    let cell_w: u16 = 2;
-    let num_cols = (grid_width / cell_w).min(max_cols) as usize;
-    if num_cols == 0 {
+    if max_cols == 0 || grid_width == 0 {
         return;
     }
+
+    // Expanded: at least 1 char wider than compact so the difference is always visible.
+    // If not all columns fit, the existing scroll logic shows the most recent subset.
+    let compact_w: u16 = if grid_width / 2 >= max_cols { 2 } else { 1 };
+    let cell_w: u16 = if expanded {
+        (grid_width / max_cols).max(compact_w + 1)
+    } else {
+        compact_w
+    };
+    let num_cols = (grid_width / cell_w).min(max_cols) as usize;
 
     let col_offset = match mode {
         IntradayMode::Hour1 => 0,
@@ -779,14 +817,11 @@ fn render_intraday_one(
                 // leave blank
             } else {
                 let val = buckets[bi];
-                let cell = &mut buf[(cx, y)];
                 if val == 0 {
-                    cell.set_symbol("\u{00b7}");
-                    cell.set_fg(t.dot_empty);
+                    fill_cell(buf, cx, y, cell_w, "\u{00b7}", t.dot_empty);
                 } else {
                     let level = token_level(val, thresholds);
-                    cell.set_symbol("\u{2580}");
-                    cell.set_fg(colors[level]);
+                    fill_cell(buf, cx, y, cell_w, "\u{2580}", colors[level]);
                 }
             }
         }
@@ -817,6 +852,8 @@ fn render_intraday_one(
 }
 
 // === Weekly (days × hours) heatmap ===
+// "Last Week" uses a 7-column (days) × 6-row (4-hour blocks) grid built from
+// minute-level data, giving finer granularity than the daily calendar view.
 
 const WEEKLY_ROWS: usize = 6;
 const WEEKLY_BUCKET_HOURS: usize = 4;
@@ -865,8 +902,8 @@ pub fn render_weekly(
     frame: &mut Frame,
     area: Rect,
     minute_data: &MinuteTokens,
-    range: (NaiveDate, NaiveDate),
     tick: usize,
+    expanded: bool,
 ) {
     let (grid_cols, grid_rows) = compute_grid(area.width, area.height);
     if grid_cols == 0 || grid_rows == 0 {
@@ -875,7 +912,7 @@ pub fn render_weekly(
 
     let t = theme();
     let today = Local::now().date_naive();
-    let start_date = range.0;
+    let start_date = today - chrono::Duration::days(6);
 
     let input_b = extract_weekly_buckets(&minute_data.input, start_date);
     let output_b = extract_weekly_buckets(&minute_data.output, start_date);
@@ -883,9 +920,7 @@ pub fn render_weekly(
     let sug_b = extract_weekly_buckets(&minute_data.lines_suggested, start_date);
 
     let now = Local::now().naive_local();
-    // today_col derived from range so the view stays correct if LastWeek's
-    // definition changes upstream.
-    let today_col = ((today - start_date).num_days().clamp(0, 6)) as usize;
+    let today_col = 6usize; // last column is today
     let current_hour = now.hour() as usize;
     let current_row = current_hour / WEEKLY_BUCKET_HOURS;
     let active = today_col * WEEKLY_ROWS + current_row + 1;
@@ -965,6 +1000,7 @@ pub fn render_weekly(
                     thresh,
                     colors,
                     tick,
+                    expanded,
                 );
                 idx += 1;
             }
@@ -983,6 +1019,7 @@ fn render_weekly_one(
     thresholds: &[u64; 4],
     colors: &[Color; 5],
     tick: usize,
+    expanded: bool,
 ) {
     if area.height < HEATMAP_HEIGHT || area.width < 12 {
         return;
@@ -1005,23 +1042,22 @@ fn render_weekly_one(
 
     let label_cols: u16 = 4;
     let grid_width = inner.width.saturating_sub(label_cols);
-    let cell_w: u16 = if grid_width / 2 >= 7 { 2 } else { 1 };
-    let num_cols = (grid_width / cell_w).min(7) as usize;
-    if num_cols == 0 {
-        return;
-    }
-
-    let col_offset = 7usize.saturating_sub(num_cols);
+    let num_cols: usize = 7;
+    let cell_w: u16 = if expanded {
+        (grid_width / num_cols as u16).max(1)
+    } else if grid_width / 2 >= num_cols as u16 {
+        2
+    } else {
+        1
+    };
 
     let total_grid_w = label_cols + num_cols as u16 * cell_w;
     let left_pad = (inner.width.saturating_sub(total_grid_w)) / 2;
     let gx = inner.x + left_pad;
 
-    let end = (col_offset + num_cols).min(col_labels.len());
-    let visible_labels: Vec<&str> = col_labels[col_offset..end]
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
+    let col_offset = 0usize;
+
+    let visible_labels: Vec<&str> = col_labels.iter().map(|s| s.as_str()).collect();
     render_intraday_col_labels(
         frame,
         gx,
@@ -1059,14 +1095,11 @@ fn render_weekly_one(
                 // future — leave blank
             } else {
                 let val = buckets[bi];
-                let cell = &mut buf[(cx, y)];
                 if val == 0 {
-                    cell.set_symbol("\u{00b7}");
-                    cell.set_fg(t.dot_empty);
+                    fill_cell(buf, cx, y, cell_w, "\u{00b7}", t.dot_empty);
                 } else {
                     let level = token_level(val, thresholds);
-                    cell.set_symbol("\u{2580}");
-                    cell.set_fg(colors[level]);
+                    fill_cell(buf, cx, y, cell_w, "\u{2580}", colors[level]);
                 }
             }
         }
