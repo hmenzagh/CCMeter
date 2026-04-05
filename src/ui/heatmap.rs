@@ -313,7 +313,7 @@ fn render_one(
 
     // Cap weeks to the time-filter range (+ partial week on each side)
     let range_days = (range.1 - range.0).num_days().max(0) as usize + 1;
-    let max_range_weeks = (range_days + 6) / 7 + 1; // round up + 1 for partial week alignment
+    let max_range_weeks = range_days.div_ceil(7) + 1; // round up + 1 for partial week alignment
     let num_weeks = max_screen_weeks.min(max_range_weeks);
     if num_weeks == 0 {
         return;
@@ -821,7 +821,7 @@ const WEEKLY_ROWS: usize = 6;
 const WEEKLY_BUCKET_HOURS: usize = 4;
 const WEEKLY_ROW_LABELS: [&str; 6] = ["0h", "4h", "8h", "12h", "16h", "20h"];
 
-/// Aggregate minute-level data into 4-hour buckets for the last 7 days.
+/// Aggregate minute-level data into 4-hour buckets for the 7 days starting at `start_date`.
 fn extract_weekly_buckets(
     data: &HashMap<(NaiveDate, u16), u64>,
     start_date: NaiveDate,
@@ -829,18 +829,14 @@ fn extract_weekly_buckets(
     // 7 days × 6 four-hour blocks = 42 buckets
     // Layout: bucket index = day * WEEKLY_ROWS + row
     let mut buckets = vec![0u64; 7 * WEEKLY_ROWS];
-    for day in 0..7 {
-        let date = start_date + chrono::Duration::days(day as i64);
-        for row in 0..WEEKLY_ROWS {
-            let hour_start = row * WEEKLY_BUCKET_HOURS;
-            let minute_start = (hour_start * 60) as u16;
-            let minute_end = minute_start + (WEEKLY_BUCKET_HOURS * 60) as u16;
-            let bi = day * WEEKLY_ROWS + row;
-            for m in minute_start..minute_end {
-                if let Some(&val) = data.get(&(date, m)) {
-                    buckets[bi] += val;
-                }
-            }
+    for (&(date, minute), &val) in data {
+        let day = (date - start_date).num_days();
+        if !(0..7).contains(&day) {
+            continue;
+        }
+        let row = (minute as usize / 60) / WEEKLY_BUCKET_HOURS;
+        if row < WEEKLY_ROWS {
+            buckets[day as usize * WEEKLY_ROWS + row] += val;
         }
     }
     buckets
@@ -868,6 +864,7 @@ pub fn render_weekly(
     frame: &mut Frame,
     area: Rect,
     minute_data: &MinuteTokens,
+    range: (NaiveDate, NaiveDate),
     tick: usize,
 ) {
     let (grid_cols, grid_rows) = compute_grid(area.width, area.height);
@@ -877,7 +874,7 @@ pub fn render_weekly(
 
     let t = theme();
     let today = Local::now().date_naive();
-    let start_date = today - chrono::Duration::days(6);
+    let start_date = range.0;
 
     let input_b = extract_weekly_buckets(&minute_data.input, start_date);
     let output_b = extract_weekly_buckets(&minute_data.output, start_date);
@@ -885,7 +882,9 @@ pub fn render_weekly(
     let sug_b = extract_weekly_buckets(&minute_data.lines_suggested, start_date);
 
     let now = Local::now().naive_local();
-    let today_col = 6usize; // last column is today
+    // today_col derived from range so the view stays correct if LastWeek's
+    // definition changes upstream.
+    let today_col = ((today - start_date).num_days().clamp(0, 6)) as usize;
     let current_hour = now.hour() as usize;
     let current_row = current_hour / WEEKLY_BUCKET_HOURS;
     let active = today_col * WEEKLY_ROWS + current_row + 1;
