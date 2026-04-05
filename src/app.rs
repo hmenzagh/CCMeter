@@ -108,6 +108,17 @@ pub(crate) struct App {
 }
 
 impl App {
+    /// Runs `App::new()` on a background thread so the main thread can
+    /// render a loading screen while project discovery and JSONL parsing
+    /// happen. The `App` is boxed to keep the channel slot small.
+    pub(crate) fn spawn_load() -> mpsc::Receiver<Box<App>> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(Box::new(App::new()));
+        });
+        rx
+    }
+
     pub(crate) fn new() -> Self {
         let (raw_groups, root_cwd_map, session_map) =
             discovery::discover_project_groups_with_root_map();

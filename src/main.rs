@@ -4,15 +4,18 @@ mod data;
 mod ui;
 
 use std::io;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use crossterm::{
     ExecutableCommand,
-    event::{self, Event as CrosstermEvent},
+    event::{self, Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
+
+use crate::ui::loading::draw_loading;
 
 #[derive(Parser)]
 #[command(name = "ccmeter", about = "Claude Code usage statistics")]
@@ -27,10 +30,16 @@ impl Drop for TerminalGuard {
     }
 }
 
+enum State {
+    Loading {
+        rx: mpsc::Receiver<Box<app::App>>,
+        start: Instant,
+    },
+    Ready(Box<app::App>),
+}
+
 fn main() -> io::Result<()> {
     let _cli = Cli::parse();
-
-    let mut app = app::App::new();
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -45,20 +54,49 @@ fn main() -> io::Result<()> {
 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let poll_timeout = Duration::from_millis(120);
+    let loading_poll = Duration::from_millis(80);
+
+    let mut state = State::Loading {
+        rx: app::App::spawn_load(),
+        start: Instant::now(),
+    };
 
     loop {
-        app.pre_render();
-        terminal.draw(|frame| app.draw(frame))?;
-        app.handle_reload();
+        match &mut state {
+            State::Loading { rx, start } => {
+                let elapsed = start.elapsed();
+                terminal.draw(|frame| draw_loading(frame, elapsed))?;
 
-        if !event::poll(poll_timeout)? {
-            continue;
-        }
+                if let Ok(app) = rx.try_recv() {
+                    state = State::Ready(app);
+                    continue;
+                }
 
-        if let CrosstermEvent::Key(key) = event::read()?
-            && !app.handle_input(key)
-        {
-            break;
+                if event::poll(loading_poll)?
+                    && let CrosstermEvent::Key(key) = event::read()?
+                    && key.kind == KeyEventKind::Press
+                    && (key.code == KeyCode::Char('q')
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)))
+                {
+                    break;
+                }
+            }
+            State::Ready(app) => {
+                app.pre_render();
+                terminal.draw(|frame| app.draw(frame))?;
+                app.handle_reload();
+
+                if !event::poll(poll_timeout)? {
+                    continue;
+                }
+
+                if let CrosstermEvent::Key(key) = event::read()?
+                    && !app.handle_input(key)
+                {
+                    break;
+                }
+            }
         }
     }
 
