@@ -22,6 +22,7 @@ use crate::ui::time_filter::{TimeFilter, date_in_filter, filter_daily};
 // ---------------------------------------------------------------------------
 
 pub(crate) enum View {
+    Landing,
     Main,
     Settings(Box<SettingsState>),
 }
@@ -173,7 +174,7 @@ impl App {
                 source_roots,
             },
             render,
-            view: View::Main,
+            view: View::Landing,
             time_filter,
             source_index,
             project_index,
@@ -274,8 +275,8 @@ impl App {
             return false;
         }
 
-        // Tab/BackTab cycle time filters globally, except in Settings where Tab switches tabs.
-        if !matches!(self.view, View::Settings(_)) {
+        // Tab/BackTab cycle time filters globally, except in Settings/Landing.
+        if !matches!(self.view, View::Settings(_) | View::Landing) {
             match key.code {
                 KeyCode::Tab => {
                     self.time_filter = self.time_filter.next();
@@ -296,6 +297,14 @@ impl App {
         }
 
         match &mut self.view {
+            View::Landing => match key.code {
+                KeyCode::Char('`') => {
+                    self.view = View::Main;
+                    self.render_dirty = true;
+                }
+                KeyCode::Char('q') => return false,
+                _ => {}
+            },
             View::Main => match key.code {
                 KeyCode::Esc if self.project_index.is_some() => {
                     self.project_index = None;
