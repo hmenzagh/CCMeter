@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.2] - 2026-04-06
+
+### Changed
+- Distribute leftover pixels to leading columns instead of discarding them; only trailing columns shrink, maximizing space usage and preserving visual alignment
+
 ## [1.3.1] - 2026-04-06
 
 ### Fixed
