@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use crate::config::discovery;
 use crate::config::overrides::{self, Overrides};
 use crate::data::cache;
+use crate::data::index::EventIndex;
 use crate::data::parser;
 use crate::data::tokens::{DailyTokens, MinuteTokens};
 use crate::ui::cards;
@@ -47,16 +48,16 @@ impl CachedKpi {
     }
 }
 
-type ReloadResult = (cache::Cache, Vec<parser::Event>);
+type ReloadResult = (cache::Cache, EventIndex);
 
 // ---------------------------------------------------------------------------
 // Sub-structs for logical grouping
 // ---------------------------------------------------------------------------
 
-/// Raw parsed data (cache + events + derived time-series).
+/// Raw parsed data (cache + compact index + derived time-series).
 pub(crate) struct AppData {
     pub(crate) merged_cache: cache::Cache,
-    pub(crate) all_events: Vec<parser::Event>,
+    pub(crate) index: EventIndex,
     pub(crate) daily_tokens: DailyTokens,
     pub(crate) thresholds: heatmap::Thresholds,
     pub(crate) minute_tokens: MinuteTokens,
@@ -124,10 +125,10 @@ impl App {
             discovery::discover_project_groups_with_root_map();
         let raw_groups = Arc::new(raw_groups);
         let session_map = Arc::new(session_map);
-        let (merged_cache, all_events) = load_data(&raw_groups, &session_map);
+        let (merged_cache, index) = load_data(&raw_groups, &session_map);
 
         let (daily_tokens, thresholds) = compute_daily_and_thresholds(&merged_cache, None, None);
-        let minute_tokens = cache::build_minute_tokens(&all_events, &session_map, None, None);
+        let minute_tokens = index.build_minute_tokens(None, None);
 
         let mut overrides = Overrides::load();
         let groups = overrides::apply_overrides(&raw_groups, &mut overrides);
@@ -140,8 +141,7 @@ impl App {
 
         let render = build_render_cache(
             &daily_tokens,
-            &all_events,
-            &session_map,
+            &index,
             &groups,
             &merged_cache,
             &overrides,
@@ -155,7 +155,7 @@ impl App {
         App {
             data: AppData {
                 merged_cache,
-                all_events,
+                index,
                 daily_tokens,
                 thresholds,
                 minute_tokens,
@@ -203,12 +203,10 @@ impl App {
         self.data.daily_tokens = d;
         self.data.thresholds = t;
         let source_root = self.config.source_roots[self.source_index].as_deref();
-        self.data.minute_tokens = cache::build_minute_tokens(
-            &self.data.all_events,
-            &self.config.session_map,
-            source_root,
-            cwds_filter.as_deref(),
-        );
+        self.data.minute_tokens = self
+            .data
+            .index
+            .build_minute_tokens(source_root, cwds_filter.as_deref());
         self.render_dirty = true;
     }
 
@@ -217,8 +215,7 @@ impl App {
         let source_root = self.config.source_roots[self.source_index].as_deref();
         self.render = build_render_cache(
             &self.data.daily_tokens,
-            &self.data.all_events,
-            &self.config.session_map,
+            &self.data.index,
             &self.config.groups,
             &self.data.merged_cache,
             &self.config.overrides,
@@ -254,10 +251,10 @@ impl App {
         }
 
         if self.reloading
-            && let Ok((c, e)) = self.reload_rx.try_recv()
+            && let Ok((c, idx)) = self.reload_rx.try_recv()
         {
             self.data.merged_cache = c;
-            self.data.all_events = e;
+            self.data.index = idx;
             self.reloading = false;
             self.recompute_tokens();
         }
@@ -391,8 +388,7 @@ fn project_cwds_static(
 #[allow(clippy::too_many_arguments)]
 fn build_render_cache(
     daily_tokens: &DailyTokens,
-    all_events: &[parser::Event],
-    session_map: &HashMap<String, (String, String)>,
+    index: &EventIndex,
     groups: &[discovery::ProjectGroup],
     merged_cache: &cache::Cache,
     overrides: &Overrides,
@@ -403,50 +399,31 @@ fn build_render_cache(
     let filtered = filter_daily(daily_tokens, time_filter);
     let today_snap = Local::now().date_naive();
     let kpi = CachedKpi::compute(&filtered);
-    let model_tokens = cards::build_model_tokens(
-        all_events,
-        session_map,
-        groups,
+    let cwd_to_root = cards::build_cwd_to_root(groups);
+    let date_filter = |d: NaiveDate| date_in_filter(d, time_filter, today_snap);
+    let stats = index.build_model_stats(
+        &cwd_to_root,
         source_root,
-        |d| date_in_filter(d, time_filter, today_snap),
+        &date_filter,
         project_cwds,
+        time_filter.is_intraday(),
     );
-    let model_daily = cards::build_model_daily_costs(
-        all_events,
-        session_map,
-        groups,
-        source_root,
-        |d| date_in_filter(d, time_filter, today_snap),
-        project_cwds,
-    );
-    let minute_model = if time_filter.is_intraday() {
-        cards::build_minute_model_costs(
-            all_events,
-            session_map,
-            groups,
-            source_root,
-            |d| date_in_filter(d, time_filter, today_snap),
-            project_cwds,
-        )
-    } else {
-        HashMap::new()
-    };
     let cards = cards::build_cards(
         groups,
         merged_cache,
         overrides,
         source_root,
-        |d| date_in_filter(d, time_filter, today_snap),
-        &model_tokens,
+        date_filter,
+        &stats.tokens,
         project_cwds,
-        &model_daily,
+        &stats.daily_costs,
     );
     let range = compute_range(&filtered, time_filter, today_snap);
 
     RenderCache {
         filtered,
         kpi,
-        minute_model,
+        minute_model: stats.minute_costs,
         cards,
         range,
     }
@@ -455,7 +432,7 @@ fn build_render_cache(
 fn load_data(
     raw_groups: &[discovery::ProjectGroup],
     session_map: &HashMap<String, (String, String)>,
-) -> (cache::Cache, Vec<parser::Event>) {
+) -> (cache::Cache, EventIndex) {
     let all_session_files: Vec<std::path::PathBuf> = raw_groups
         .iter()
         .flat_map(|g| g.sources.iter())
@@ -467,7 +444,9 @@ fn load_data(
     let fresh_cache = cache::from_events(&events, session_map);
     let merged = cache::merge(old_cache, &fresh_cache);
     cache::save(&merged);
-    (merged, events)
+
+    let index = EventIndex::build(&events, session_map);
+    (merged, index)
 }
 
 fn spawn_reload(
@@ -479,8 +458,8 @@ fn spawn_reload(
     let session_map = Arc::clone(session_map);
     let tx = tx.clone();
     std::thread::spawn(move || {
-        let result = load_data(&raw_groups, &session_map);
-        let _ = tx.send(result);
+        let (cache, index) = load_data(&raw_groups, &session_map);
+        let _ = tx.send((cache, index));
     });
 }
 

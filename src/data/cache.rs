@@ -5,7 +5,7 @@ use chrono::{NaiveDate, Timelike};
 use serde::{Deserialize, Serialize};
 
 use super::parser::Event;
-use super::tokens::{DailyTokens, MinuteTokens};
+use super::tokens::DailyTokens;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -308,45 +308,6 @@ pub fn to_daily_tokens_filtered(
     daily
 }
 
-// ---------------------------------------------------------------------------
-// Build MinuteTokens from events (for intraday views)
-// ---------------------------------------------------------------------------
-
-pub fn build_minute_tokens(
-    events: &[Event],
-    session_info: &HashMap<String, (String, String)>,
-    source_root: Option<&str>,
-    project_cwds: Option<&[String]>,
-) -> MinuteTokens {
-    let mut mt = MinuteTokens::default();
-    for ev in events {
-        let (root, cwd) = match session_info.get(&ev.session_file) {
-            Some(pair) => pair,
-            None => continue,
-        };
-        if let Some(filter_root) = source_root
-            && root != filter_root
-        {
-            continue;
-        }
-        if let Some(cwds) = project_cwds
-            && !cwds.contains(cwd)
-        {
-            continue;
-        }
-        let local = ev.timestamp.with_timezone(&chrono::Local);
-        let date = local.date_naive();
-        let minute_of_day = local.hour() as u16 * 60 + local.minute() as u16;
-        let key = (date, minute_of_day);
-
-        *mt.input.entry(key).or_default() += ev.input_tokens;
-        *mt.output.entry(key).or_default() += ev.output_tokens;
-        *mt.lines_accepted.entry(key).or_default() += ev.lines_accepted;
-        *mt.lines_suggested.entry(key).or_default() += ev.lines_suggested;
-        *mt.cost.entry(key).or_default() += ev.cost_usd;
-    }
-    mt
-}
 
 // ---------------------------------------------------------------------------
 // Tests

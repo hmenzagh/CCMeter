@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{NaiveDate, Timelike};
+use chrono::NaiveDate;
 
 use crate::config::discovery::ProjectGroup;
 use crate::config::overrides::Overrides;
@@ -228,7 +228,7 @@ fn accumulate_entry(
     }
 }
 
-fn build_cwd_to_root(groups: &[ProjectGroup]) -> HashMap<String, String> {
+pub fn build_cwd_to_root(groups: &[ProjectGroup]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for group in groups {
         let root_key = group.root_key();
@@ -241,151 +241,6 @@ fn build_cwd_to_root(groups: &[ProjectGroup]) -> HashMap<String, String> {
     map
 }
 
-fn filtered_model_events<'a>(
-    events: &'a [crate::data::parser::Event],
-    session_map: &'a HashMap<String, (String, String)>,
-    cwd_to_root: &'a HashMap<String, String>,
-    source_root: Option<&'a str>,
-    date_filter: &'a impl Fn(NaiveDate) -> bool,
-    project_cwds: Option<&'a [String]>,
-) -> impl Iterator<
-    Item = (
-        &'a str,
-        &'static str,
-        NaiveDate,
-        &'a crate::data::parser::Event,
-    ),
-> {
-    events.iter().filter_map(move |ev| {
-        if ev.model.is_empty() {
-            return None;
-        }
-        let (root, cwd) = session_map.get(&ev.session_file)?;
-        if let Some(filter_root) = source_root
-            && root != filter_root
-        {
-            return None;
-        }
-        if let Some(cwds) = project_cwds
-            && !cwds.contains(cwd)
-        {
-            return None;
-        }
-        let date = ev.timestamp.date_naive();
-        if !date_filter(date) {
-            return None;
-        }
-        let root_path = cwd_to_root.get(cwd.as_str())?;
-        let model_name = crate::data::models::normalize_model(&ev.model);
-        Some((root_path.as_str(), model_name, date, ev))
-    })
-}
-
-pub fn build_model_tokens(
-    events: &[crate::data::parser::Event],
-    session_map: &HashMap<String, (String, String)>,
-    groups: &[ProjectGroup],
-    source_root: Option<&str>,
-    date_filter: impl Fn(NaiveDate) -> bool,
-    project_cwds: Option<&[String]>,
-) -> HashMap<(String, String), u64> {
-    let cwd_to_root = build_cwd_to_root(groups);
-    let mut result: HashMap<(String, String), u64> = HashMap::new();
-
-    for (root_path, model_name, _date, ev) in filtered_model_events(
-        events,
-        session_map,
-        &cwd_to_root,
-        source_root,
-        &date_filter,
-        project_cwds,
-    ) {
-        let total = ev.input_tokens + ev.output_tokens;
-        *result
-            .entry((root_path.to_string(), model_name.to_string()))
-            .or_default() += total;
-    }
-
-    result
-}
-
-pub fn build_model_daily_costs(
-    events: &[crate::data::parser::Event],
-    session_map: &HashMap<String, (String, String)>,
-    groups: &[ProjectGroup],
-    source_root: Option<&str>,
-    date_filter: impl Fn(NaiveDate) -> bool,
-    project_cwds: Option<&[String]>,
-) -> HashMap<(String, String), HashMap<NaiveDate, f64>> {
-    let cwd_to_root = build_cwd_to_root(groups);
-    let mut result: HashMap<(String, String), HashMap<NaiveDate, f64>> = HashMap::new();
-
-    for (root_path, model_name, date, ev) in filtered_model_events(
-        events,
-        session_map,
-        &cwd_to_root,
-        source_root,
-        &date_filter,
-        project_cwds,
-    ) {
-        if ev.cost_usd <= 0.0 {
-            continue;
-        }
-        *result
-            .entry((root_path.to_string(), model_name.to_string()))
-            .or_default()
-            .entry(date)
-            .or_default() += ev.cost_usd;
-    }
-
-    result
-}
-
-pub fn build_minute_model_costs(
-    events: &[crate::data::parser::Event],
-    session_map: &HashMap<String, (String, String)>,
-    groups: &[ProjectGroup],
-    source_root: Option<&str>,
-    date_filter: impl Fn(NaiveDate) -> bool,
-    project_cwds: Option<&[String]>,
-) -> HashMap<(String, String), HashMap<(NaiveDate, u16), f64>> {
-    let cwd_to_root = build_cwd_to_root(groups);
-    let mut result: HashMap<(String, String), HashMap<(NaiveDate, u16), f64>> = HashMap::new();
-
-    for ev in events {
-        if ev.model.is_empty() || ev.cost_usd <= 0.0 {
-            continue;
-        }
-        let (root, cwd) = match session_map.get(&ev.session_file) {
-            Some(pair) => pair,
-            None => continue,
-        };
-        if source_root.is_some_and(|sr| sr != root) {
-            continue;
-        }
-        if project_cwds.is_some_and(|cwds| !cwds.contains(cwd)) {
-            continue;
-        }
-        let local = ev.timestamp.with_timezone(&chrono::Local);
-        let date = local.date_naive();
-        if !date_filter(date) {
-            continue;
-        }
-        let root_path = match cwd_to_root.get(cwd.as_str()) {
-            Some(r) => r,
-            None => continue,
-        };
-        let model_name = crate::data::models::normalize_model(&ev.model);
-        let minute_of_day = local.hour() as u16 * 60 + local.minute() as u16;
-        *result
-            .entry((root_path.clone(), model_name.to_string()))
-            .or_default()
-            .entry((date, minute_of_day))
-            .or_default() += ev.cost_usd;
-    }
-
-    result
-}
 
 fn compute_model_shares(
     root_key: &str,
