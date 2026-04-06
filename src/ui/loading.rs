@@ -1,9 +1,6 @@
 use std::time::Duration;
 
-use ratatui::{
-    prelude::*,
-    widgets::Paragraph,
-};
+use ratatui::{prelude::*, widgets::Paragraph};
 
 use super::theme::{star_span, theme};
 
@@ -60,10 +57,7 @@ pub(crate) fn draw_loading(frame: &mut Frame, elapsed: Duration) {
     }
     padded.extend(lines);
 
-    frame.render_widget(
-        Paragraph::new(padded).alignment(Alignment::Center),
-        area,
-    );
+    frame.render_widget(Paragraph::new(padded).alignment(Alignment::Center), area);
 }
 
 fn draw_compact(frame: &mut Frame, area: Rect, elapsed: Duration) {
