@@ -69,7 +69,7 @@ pub fn compute_thresholds(daily: &HashMap<NaiveDate, u64>) -> [u64; 4] {
 }
 
 /// Fill `width` consecutive buffer cells at (x, y) with the same symbol and color.
-fn fill_cell(
+pub(super) fn fill_cell(
     buf: &mut ratatui::buffer::Buffer,
     x: u16,
     y: u16,
@@ -338,18 +338,20 @@ fn render_one(
     // Cap weeks to the time-filter range (+ partial week on each side)
     let range_days = (range.1 - range.0).num_days().max(0) as usize + 1;
     let max_range_weeks = range_days.div_ceil(7) + 1; // +1 for partial week at boundary
-    let max_screen_weeks = (grid_width / 2) as usize; // minimum cell_w of 2
+    let max_screen_weeks = grid_width as usize; // min cell_w is 1
     let num_weeks = max_screen_weeks.min(max_range_weeks);
     if num_weeks == 0 {
         return;
     }
 
-    // Expanded: scale cells to fill panel width; compact: fixed 2-char cells
     let cell_w: u16 = if expanded {
-        (grid_width / num_weeks as u16).max(2)
-    } else {
+        (grid_width / num_weeks as u16).max(1)
+    } else if (grid_width / 2) as usize >= num_weeks {
         2
+    } else {
+        1
     };
+    let fill_w: u16 = if expanded { cell_w } else { 1 };
     let total_grid_w = label_cols + num_weeks as u16 * cell_w;
     let left_pad = (inner.width.saturating_sub(total_grid_w)) / 2;
     let gx = inner.x + left_pad;
@@ -397,11 +399,11 @@ fn render_one(
             } else {
                 match daily_tokens.get(&date) {
                     None => {
-                        fill_cell(buf, cx, y, cell_w, "\u{00b7}", t.dot_empty);
+                        fill_cell(buf, cx, y, fill_w, "\u{00b7}", t.dot_empty);
                     }
                     Some(&val) => {
                         let level = token_level(val, thresholds);
-                        fill_cell(buf, cx, y, cell_w, "\u{2580}", colors[level]);
+                        fill_cell(buf, cx, y, fill_w, "\u{2580}", colors[level]);
                     }
                 }
             }
@@ -748,11 +750,12 @@ fn render_intraday_one(
     // If not all columns fit, the existing scroll logic shows the most recent subset.
     let compact_w: u16 = if grid_width / 2 >= max_cols { 2 } else { 1 };
     let cell_w: u16 = if expanded {
-        (grid_width / max_cols).max(compact_w + 1)
+        (grid_width / max_cols).max(1)
     } else {
         compact_w
     };
     let num_cols = (grid_width / cell_w).min(max_cols) as usize;
+    let fill_w = if expanded { cell_w } else { 1 };
 
     let col_offset = match mode {
         IntradayMode::Hour1 => 0,
@@ -818,10 +821,10 @@ fn render_intraday_one(
             } else {
                 let val = buckets[bi];
                 if val == 0 {
-                    fill_cell(buf, cx, y, cell_w, "\u{00b7}", t.dot_empty);
+                    fill_cell(buf, cx, y, fill_w, "\u{00b7}", t.dot_empty);
                 } else {
                     let level = token_level(val, thresholds);
-                    fill_cell(buf, cx, y, cell_w, "\u{2580}", colors[level]);
+                    fill_cell(buf, cx, y, fill_w, "\u{2580}", colors[level]);
                 }
             }
         }
@@ -1054,8 +1057,7 @@ fn render_weekly_one(
     let total_grid_w = label_cols + num_cols as u16 * cell_w;
     let left_pad = (inner.width.saturating_sub(total_grid_w)) / 2;
     let gx = inner.x + left_pad;
-
-    let col_offset = 0usize;
+    let fill_w = if expanded { cell_w } else { 1 };
 
     let visible_labels: Vec<&str> = col_labels.iter().map(|s| s.as_str()).collect();
     render_intraday_col_labels(
@@ -1085,8 +1087,7 @@ fn render_weekly_one(
         }
 
         for col in 0..num_cols {
-            let actual_col = col_offset + col;
-            let bi = actual_col * WEEKLY_ROWS + row;
+            let bi = col * WEEKLY_ROWS + row;
             let cx = gx + label_cols + (col as u16) * cell_w;
             if cx >= buf.area().right() {
                 break;
@@ -1096,10 +1097,10 @@ fn render_weekly_one(
             } else {
                 let val = buckets[bi];
                 if val == 0 {
-                    fill_cell(buf, cx, y, cell_w, "\u{00b7}", t.dot_empty);
+                    fill_cell(buf, cx, y, fill_w, "\u{00b7}", t.dot_empty);
                 } else {
                     let level = token_level(val, thresholds);
-                    fill_cell(buf, cx, y, cell_w, "\u{2580}", colors[level]);
+                    fill_cell(buf, cx, y, fill_w, "\u{2580}", colors[level]);
                 }
             }
         }

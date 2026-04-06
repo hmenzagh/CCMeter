@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 use crate::config::discovery;
 use crate::config::overrides::{self, Overrides};
+use crate::config::settings::Settings;
 use crate::data::cache;
 use crate::data::parser;
 use crate::data::tokens::{DailyTokens, MinuteTokens};
@@ -65,6 +66,7 @@ pub(crate) struct AppData {
 /// Project configuration (discovery results + user overrides).
 pub(crate) struct AppConfig {
     pub(crate) overrides: Overrides,
+    pub(crate) settings: Settings,
     pub(crate) groups: Vec<discovery::ProjectGroup>,
     pub(crate) raw_groups: Arc<Vec<discovery::ProjectGroup>>,
     pub(crate) session_map: Arc<HashMap<String, (String, String)>>,
@@ -134,7 +136,8 @@ impl App {
         let (source_names, source_roots) = build_source_list(&root_cwd_map);
         let source_index: usize = 0;
         let project_index: Option<usize> = None;
-        let time_filter = TimeFilter::All;
+        let settings = Settings::load();
+        let time_filter = settings.time_filter.unwrap_or(TimeFilter::All);
 
         let cwds_filter = project_cwds_static(&groups, project_index);
 
@@ -162,6 +165,7 @@ impl App {
             },
             config: AppConfig {
                 overrides,
+                settings,
                 groups,
                 raw_groups,
                 session_map,
@@ -278,6 +282,8 @@ impl App {
             match key.code {
                 KeyCode::Tab => {
                     self.time_filter = self.time_filter.next();
+                    self.config.settings.time_filter = Some(self.time_filter);
+                    self.config.settings.save();
                     self.card_scroll = 0;
                     self.render_dirty = true;
                     return true;
@@ -342,11 +348,11 @@ impl App {
                 _ => {}
             },
             View::Settings(state) => {
-                match state.handle_key(key, &self.config.groups, &mut self.config.overrides) {
+                match state.handle_key(key, &self.config.groups, &mut self.config.overrides, &mut self.config.settings) {
                     KeyResult::Rebuild => {
                         let selected = state.selected;
                         let tick = state.tick;
-                        let tab = state.tab_index();
+                        let tab = state.active_tab();
                         self.config.groups = overrides::apply_overrides(
                             &self.config.raw_groups,
                             &mut self.config.overrides,

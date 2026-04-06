@@ -6,13 +6,15 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
+use super::heatmap::fill_cell;
 use super::theme::theme;
 use crate::config::discovery::{self, OverrideInfo, ProjectGroup};
 use crate::config::overrides::Overrides;
+use crate::config::settings::Settings;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 /// Settings view is split into tabs, cycled with the Tab key.
-enum SettingsTab {
+pub enum SettingsTab {
     Projects,
     Display,
 }
@@ -39,16 +41,6 @@ impl SettingsTab {
 enum RowKind {
     Group(usize),
     Source(usize, usize),
-}
-
-/// Selectable rows on the Display settings tab.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum DisplayRow {
-    ExpandedHeatmap,
-}
-
-impl DisplayRow {
-    const ALL: &'static [DisplayRow] = &[DisplayRow::ExpandedHeatmap];
 }
 
 pub enum KeyResult {
@@ -137,7 +129,6 @@ pub struct SettingsState {
     search: Option<SearchState>,
     confirm_reset: bool,
     pub tick: usize,
-    display_selected: usize,
 }
 
 impl SettingsState {
@@ -152,29 +143,22 @@ impl SettingsState {
             search: None,
             confirm_reset: false,
             tick: 0,
-            display_selected: 0,
         };
         s.rebuild_rows(groups);
         s
     }
 
-    pub fn with_selected(groups: &[ProjectGroup], selected: usize, tab: Option<u8>) -> Self {
+    pub fn with_selected(groups: &[ProjectGroup], selected: usize, tab: Option<SettingsTab>) -> Self {
         let mut s = Self::new(groups);
         s.selected = selected.min(s.rows.len().saturating_sub(1));
         if let Some(t) = tab {
-            s.tab = match t {
-                1 => SettingsTab::Display,
-                _ => SettingsTab::Projects,
-            };
+            s.tab = t;
         }
         s
     }
 
-    pub fn tab_index(&self) -> u8 {
-        match self.tab {
-            SettingsTab::Projects => 0,
-            SettingsTab::Display => 1,
-        }
+    pub fn active_tab(&self) -> SettingsTab {
+        self.tab
     }
 
     fn rebuild_rows(&mut self, groups: &[ProjectGroup]) {
@@ -205,6 +189,7 @@ impl SettingsState {
         key: KeyEvent,
         groups: &[ProjectGroup],
         overrides: &mut Overrides,
+        settings: &mut Settings,
     ) -> KeyResult {
         if key.kind != KeyEventKind::Press {
             return KeyResult::Continue;
@@ -298,7 +283,7 @@ impl SettingsState {
 
         match self.tab {
             SettingsTab::Projects => self.handle_projects_key(key, groups, overrides),
-            SettingsTab::Display => self.handle_display_key(key, overrides),
+            SettingsTab::Display => self.handle_display_key(key, settings),
         }
     }
 
@@ -434,26 +419,14 @@ impl SettingsState {
         KeyResult::Continue
     }
 
-    fn handle_display_key(&mut self, key: KeyEvent, overrides: &mut Overrides) -> KeyResult {
+    fn handle_display_key(&mut self, key: KeyEvent, settings: &mut Settings) -> KeyResult {
         match key.code {
             KeyCode::Esc | KeyCode::Char('.') => return KeyResult::Close,
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.display_selected > 0 {
-                    self.display_selected -= 1;
-                }
+            KeyCode::Left | KeyCode::Right => {
+                settings.expanded_heatmap = !settings.expanded_heatmap;
+                settings.save();
+                return KeyResult::Rebuild;
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.display_selected + 1 < DisplayRow::ALL.len() {
-                    self.display_selected += 1;
-                }
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => match DisplayRow::ALL[self.display_selected] {
-                DisplayRow::ExpandedHeatmap => {
-                    overrides.display.expanded_heatmap = !overrides.display.expanded_heatmap;
-                    overrides.save();
-                    return KeyResult::Rebuild;
-                }
-            },
             _ => {}
         }
         KeyResult::Continue
@@ -465,6 +438,7 @@ impl SettingsState {
         area: Rect,
         groups: &[ProjectGroup],
         overrides: &Overrides,
+        settings: &Settings,
     ) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -487,7 +461,7 @@ impl SettingsState {
                 }
             }
             SettingsTab::Display => {
-                self.render_display_tab(frame, chunks[1], overrides);
+                self.render_display_tab(frame, chunks[1], settings);
                 self.render_display_status_bar(frame, chunks[2]);
             }
         }
@@ -506,7 +480,7 @@ impl SettingsState {
         let mut spans = Vec::new();
         for (i, tab) in SettingsTab::ALL.iter().enumerate() {
             if i > 0 {
-                spans.push(Span::styled(" | ", Style::default().fg(t.text_dim)));
+                spans.push(Span::styled(" │ ", Style::default().fg(t.divider)));
             }
             if *tab == self.tab {
                 spans.push(Span::styled(
@@ -519,10 +493,6 @@ impl SettingsState {
                 spans.push(Span::styled(tab.label(), Style::default().fg(t.text_dim)));
             }
         }
-        spans.push(Span::styled(
-            "      Tab to switch",
-            Style::default().fg(t.text_dim),
-        ));
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
@@ -721,10 +691,11 @@ impl SettingsState {
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded)
                     .border_style(if self.merge_first.is_some() {
                         Style::default().fg(t.warning)
                     } else {
-                        Style::default()
+                        Style::default().fg(t.border)
                     }),
             )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -868,57 +839,41 @@ impl SettingsState {
         ListItem::new(line)
     }
 
-    fn render_display_tab(&self, frame: &mut Frame, area: Rect, overrides: &Overrides) {
+    fn render_display_tab(&self, frame: &mut Frame, area: Rect, settings: &Settings) {
         let t = theme();
+        let is_expanded = settings.expanded_heatmap;
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(2),
                 Constraint::Length(6),
                 Constraint::Min(0),
             ])
             .split(area);
 
-        // --- Setting row: expanded heatmap toggle ---
-        let is_on = overrides.display.expanded_heatmap;
-        let selected = self.display_selected == 0;
-
-        let toggle = if is_on { "[x]" } else { "[ ]" };
-        let style = if selected {
-            Style::default()
-                .fg(t.heatmap_title)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(t.text_dim)
-        };
-        let desc_style = if selected {
-            Style::default().fg(Color::White)
-        } else {
-            Style::default().fg(t.text_dim)
-        };
-
-        let row = Line::from(vec![
-            Span::styled(format!("  {} ", toggle), style),
-            Span::styled("Expanded heatmap", desc_style),
+        // --- Heatmap mode selector (←→ to switch) ---
+        let label = Line::from(vec![
+            Span::styled("  Heatmap mode: ", Style::default().fg(t.text_dim)),
+            Span::styled(
+                if is_expanded { "Expanded" } else { "Compact" },
+                Style::default()
+                    .fg(t.heatmap_title)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]);
-        let desc = Line::from(vec![Span::styled(
-            "      Scale heatmap cells to fill the panel width",
-            Style::default().fg(t.text_dim),
-        )]);
-
-        let setting_block = Paragraph::new(vec![Line::raw(""), row, desc]);
+        let setting_block = Paragraph::new(vec![Line::raw(""), label]);
         frame.render_widget(setting_block, chunks[0]);
 
-        // --- Inline preview (fixed height, always Expanded|Compact order) ---
+        // --- Inline preview ---
         if chunks[1].width >= 30 {
             let cols_area = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(chunks[1]);
 
-            self.render_mini_heatmap(frame, cols_area[0], !is_on, false);
-            self.render_mini_heatmap(frame, cols_area[1], is_on, true);
+            self.render_mini_heatmap(frame, cols_area[0], !is_expanded, false);
+            self.render_mini_heatmap(frame, cols_area[1], is_expanded, true);
         }
     }
 
@@ -966,11 +921,12 @@ impl SettingsState {
         } else {
             2
         };
+        let fill_w: u16 = if expanded { cell_w } else { 1 };
         let grid_w = sample_cols * cell_w;
         let left_pad = if expanded {
             (inner.width.saturating_sub(grid_w)) / 2
         } else {
-            0
+            1
         };
 
         let pattern: &[&[u8]] = &[
@@ -994,23 +950,10 @@ impl SettingsState {
                     break;
                 }
                 let level = pat_row[col % pat_row.len()] as usize;
-                let right = buf.area().right();
                 if level == 0 {
-                    for dx in 0..cell_w {
-                        if cx + dx < right {
-                            let c = &mut buf[(cx + dx, y)];
-                            c.set_symbol("\u{00b7}");
-                            c.set_fg(t.dot_empty);
-                        }
-                    }
+                    fill_cell(buf, cx, y, fill_w, "\u{00b7}", t.dot_empty);
                 } else {
-                    for dx in 0..cell_w {
-                        if cx + dx < right {
-                            let c = &mut buf[(cx + dx, y)];
-                            c.set_symbol("\u{2580}");
-                            c.set_fg(colors[level.min(4)]);
-                        }
-                    }
+                    fill_cell(buf, cx, y, fill_w, "\u{2580}", colors[level.min(4)]);
                 }
             }
         }
@@ -1018,24 +961,14 @@ impl SettingsState {
 
     fn render_display_status_bar(&self, frame: &mut Frame, area: Rect) {
         let hints = vec![
-            Span::styled(" ↑↓ ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw("Navigate   "),
-            Span::styled(
-                " Enter/Space ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("Toggle   "),
+            Span::styled(" ←→ ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("Switch mode   "),
             Span::styled(" Tab ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw("Switch tab   "),
             Span::styled(" . ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw("Back"),
         ];
-        let bar = Paragraph::new(Line::from(hints)).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme().text_dim)),
-        );
-        frame.render_widget(bar, area);
+        render_hint_bar(frame, area, hints);
     }
 
     fn render_status_bar(
@@ -1142,13 +1075,19 @@ impl SettingsState {
             h
         };
 
-        let bar = Paragraph::new(Line::from(hints)).block(
+        render_hint_bar(frame, area, hints);
+    }
+}
+
+fn render_hint_bar(frame: &mut Frame, area: Rect, hints: Vec<Span<'_>>) {
+    let bar = Paragraph::new(Line::from(hints))
+        .alignment(Alignment::Center)
+        .block(
             Block::default()
                 .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme().text_dim)),
+                .border_style(Style::default().fg(theme().divider)),
         );
-        frame.render_widget(bar, area);
-    }
+    frame.render_widget(bar, area);
 }
 
 fn truncate_str(s: &str, max: usize) -> String {

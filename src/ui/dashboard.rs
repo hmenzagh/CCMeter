@@ -66,6 +66,7 @@ impl App {
                         content_area,
                         &self.config.groups,
                         &self.config.overrides,
+                        &self.config.settings,
                     );
                 }
             }
@@ -73,6 +74,9 @@ impl App {
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
+        if matches!(self.view, View::Settings(_)) {
+            return;
+        }
         let t = theme();
         let footer_text = if self.reloading {
             "⟳ Reloading…"
@@ -224,7 +228,7 @@ impl App {
             .split(inner);
 
         let anim_tick = (self.start_time.elapsed().as_millis() / 80) as usize;
-        let expanded = self.config.overrides.display.expanded_heatmap;
+        let expanded = self.config.settings.expanded_heatmap;
         if self.time_filter.is_intraday() {
             let mode = match self.time_filter {
                 TimeFilter::Hour1 => heatmap::IntradayMode::Hour1,

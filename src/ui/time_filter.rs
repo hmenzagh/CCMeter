@@ -4,7 +4,7 @@ use chrono::{Local, NaiveDate};
 
 use crate::data::tokens;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum TimeFilter {
     Hour1,
     Hour12,
