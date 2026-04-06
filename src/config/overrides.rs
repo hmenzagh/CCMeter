@@ -6,13 +6,6 @@ use serde::{Deserialize, Serialize};
 use super::discovery::{self, OverrideInfo, ProjectGroup, ProjectSource};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct DisplaySettings {
-    /// When true, heatmap cells scale to fill the panel width.
-    #[serde(default)]
-    pub expanded_heatmap: bool,
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Overrides {
     #[serde(default)]
     pub merges: Vec<Vec<String>>,
@@ -27,8 +20,6 @@ pub struct Overrides {
     pub hidden: HashSet<String>,
     #[serde(default)]
     pub renames: HashMap<String, String>,
-    #[serde(default)]
-    pub display: DisplaySettings,
 }
 
 impl Overrides {
