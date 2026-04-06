@@ -148,7 +148,11 @@ impl SettingsState {
         s
     }
 
-    pub fn with_selected(groups: &[ProjectGroup], selected: usize, tab: Option<SettingsTab>) -> Self {
+    pub fn with_selected(
+        groups: &[ProjectGroup],
+        selected: usize,
+        tab: Option<SettingsTab>,
+    ) -> Self {
         let mut s = Self::new(groups);
         s.selected = selected.min(s.rows.len().saturating_sub(1));
         if let Some(t) = tab {

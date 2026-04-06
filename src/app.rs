@@ -348,7 +348,12 @@ impl App {
                 _ => {}
             },
             View::Settings(state) => {
-                match state.handle_key(key, &self.config.groups, &mut self.config.overrides, &mut self.config.settings) {
+                match state.handle_key(
+                    key,
+                    &self.config.groups,
+                    &mut self.config.overrides,
+                    &mut self.config.settings,
+                ) {
                     KeyResult::Rebuild => {
                         let selected = state.selected;
                         let tick = state.tick;
