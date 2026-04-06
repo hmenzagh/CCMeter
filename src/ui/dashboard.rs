@@ -181,16 +181,7 @@ impl App {
     fn draw_main_dashboard(&self, frame: &mut Frame, content_area: Rect) {
         let t = theme();
         let tick = (self.start_time.elapsed().as_millis() / 150) as usize;
-        static STAR_FRAMES: [&str; 12] =
-            [" ", "·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢", "·"];
-        let star = STAR_FRAMES[tick % STAR_FRAMES.len()];
-        let pulse = ((tick % 12) as f32 / 11.0 * std::f32::consts::PI).sin();
-        let (sr, sg, sb) = t.star_base;
-        let (ar, ag, ab) = t.star_amplitude;
-        let r = sr + (ar * pulse) as u8;
-        let g = sg + (ag * pulse) as u8;
-        let b = sb + (ab * pulse) as u8;
-        let star_style = Style::default().fg(Color::Rgb(r, g, b));
+        let (star, star_style) = super::theme::star_span(tick);
 
         let title_spans = vec![
             Span::raw(" "),
