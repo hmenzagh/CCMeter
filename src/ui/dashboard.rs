@@ -5,6 +5,7 @@ use ratatui::{
 
 use super::cards;
 use super::heatmap;
+use super::landing;
 use super::theme::theme;
 use super::time_filter::TimeFilter;
 use crate::app::{App, View};
@@ -16,6 +17,19 @@ use crate::app::{App, View};
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+
+        if matches!(self.view, View::Landing) {
+            landing::render(
+                frame,
+                area,
+                &self.data.rate_limit_hits,
+                &self.config.source_names,
+                &self.config.source_roots,
+                &self.data.oauth_credentials,
+                Some(self.landing_selected),
+            );
+            return;
+        }
 
         let outer = Layout::default()
             .direction(Direction::Vertical)
@@ -59,6 +73,7 @@ impl App {
             self.draw_too_small_popup(frame, content_area, MIN_WIDTH, MIN_HEIGHT);
         } else {
             match &self.view {
+                View::Landing => unreachable!(),
                 View::Main => self.draw_main_dashboard(frame, content_area),
                 View::Settings(state) => {
                     state.render(

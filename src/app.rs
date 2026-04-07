@@ -11,6 +11,8 @@ use crate::config::settings::Settings;
 use crate::data::cache;
 use crate::data::index::EventIndex;
 use crate::data::parser;
+use crate::data::oauth::{OAuthCredential, UsagePoller};
+use crate::data::rate_limits::RateLimitHit;
 use crate::data::tokens::{DailyTokens, MinuteTokens};
 use crate::ui::cards;
 use crate::ui::heatmap;
@@ -63,6 +65,8 @@ pub(crate) struct AppData {
     pub(crate) daily_tokens: DailyTokens,
     pub(crate) thresholds: heatmap::Thresholds,
     pub(crate) minute_tokens: MinuteTokens,
+    pub(crate) rate_limit_hits: Vec<RateLimitHit>,
+    pub(crate) oauth_credentials: Vec<OAuthCredential>,
 }
 
 /// Project configuration (discovery results + user overrides).
@@ -101,6 +105,7 @@ pub(crate) struct App {
 
     pub(crate) render_dirty: bool,
     pub(crate) card_scroll: usize,
+    pub(crate) landing_selected: usize,
 
     pub(crate) reloading: bool,
     reload_tx: mpsc::Sender<ReloadResult>,
@@ -109,6 +114,8 @@ pub(crate) struct App {
     pub(crate) start_time: std::time::Instant,
     pub(crate) last_reload: std::time::Instant,
     pub(crate) reload_interval: Duration,
+
+    usage_poller: UsagePoller,
 }
 
 impl App {
@@ -133,6 +140,10 @@ impl App {
         let (daily_tokens, thresholds) = compute_daily_and_thresholds(&merged_cache, None, None);
         let minute_tokens = index.build_minute_tokens(None, None);
 
+        let root_paths: Vec<std::path::PathBuf> = root_cwd_map.keys().cloned().collect();
+        let rate_limit_hits = crate::data::rate_limits::discover_rate_limit_hits(&root_paths);
+        let oauth_credentials = crate::data::oauth::discover_credentials_with_usage(&root_paths);
+
         let mut overrides = Overrides::load();
         let groups = overrides::apply_overrides(&raw_groups, &mut overrides);
         let (source_names, source_roots) = build_source_list(&root_cwd_map);
@@ -155,6 +166,7 @@ impl App {
         );
 
         let (reload_tx, reload_rx) = mpsc::channel::<ReloadResult>();
+        let usage_poller = UsagePoller::new(&oauth_credentials);
 
         App {
             data: AppData {
@@ -163,6 +175,8 @@ impl App {
                 daily_tokens,
                 thresholds,
                 minute_tokens,
+                rate_limit_hits,
+                oauth_credentials,
             },
             config: AppConfig {
                 overrides,
@@ -180,12 +194,14 @@ impl App {
             project_index,
             render_dirty: false,
             card_scroll: 0,
+            landing_selected: 0,
             reloading: false,
             reload_tx,
             reload_rx,
             start_time: std::time::Instant::now(),
             last_reload: std::time::Instant::now(),
             reload_interval: Duration::from_secs(5 * 60),
+            usage_poller,
         }
     }
 
@@ -207,7 +223,6 @@ impl App {
         );
         self.data.daily_tokens = d;
         self.data.thresholds = t;
-        let source_root = self.config.source_roots[self.source_index].as_deref();
         self.data.minute_tokens = self
             .data
             .index
@@ -245,6 +260,10 @@ impl App {
     }
 
     pub(crate) fn handle_reload(&mut self) {
+        // Poll usage API for each credential on its own random timer
+        self.usage_poller
+            .poll(&mut self.data.oauth_credentials);
+
         if self.last_reload.elapsed() >= self.reload_interval && !self.reloading {
             spawn_reload(
                 &self.config.raw_groups,
@@ -303,6 +322,18 @@ impl App {
                     self.render_dirty = true;
                 }
                 KeyCode::Char('q') => return false,
+                KeyCode::Right | KeyCode::Char('l') => {
+                    let n = self.data.oauth_credentials.len();
+                    if n > 0 {
+                        self.landing_selected = (self.landing_selected + 1) % n;
+                    }
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    let n = self.data.oauth_credentials.len();
+                    if n > 0 {
+                        self.landing_selected = (self.landing_selected + n - 1) % n;
+                    }
+                }
                 _ => {}
             },
             View::Main => match key.code {
