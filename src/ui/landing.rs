@@ -807,7 +807,8 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], tick: us
             (0.0, sum_y / nn)
         };
 
-        let trend_color = t.cost;
+        let (sr, sg, sb) = t.star_base;
+        let trend_color = Color::Rgb(sr, sg, sb);
         let buf = frame.buffer_mut();
         let chart_w = total_chart_w;
         let vn = visible.len();
