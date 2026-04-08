@@ -27,6 +27,7 @@ impl App {
                 &self.config.source_roots,
                 &self.data.oauth_credentials,
                 Some(self.landing_selected),
+                &self.data.index,
             );
             return;
         }

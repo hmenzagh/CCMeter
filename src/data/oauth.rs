@@ -12,7 +12,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct UsageWindow {
     pub utilization: f64,
-    pub resets_at: String,
+    #[serde(default)]
+    pub resets_at: Option<String>,
 }
 
 /// Extra usage / overages info.
@@ -160,7 +161,8 @@ impl UsagePoller {
 
     /// Call this in the event loop. Spawns background fetches when timers expire,
     /// and applies results back to the credentials vec.
-    pub fn poll(&mut self, credentials: &mut [OAuthCredential]) {
+    /// Returns `true` if any credential's usage was updated this tick.
+    pub fn poll(&mut self, credentials: &mut [OAuthCredential]) -> bool {
         let now = Instant::now();
 
         // Spawn fetches for credentials whose timer has expired
@@ -184,6 +186,7 @@ impl UsagePoller {
         }
 
         // Collect results
+        let mut updated = false;
         while let Ok(result) = self.rx.try_recv() {
             let i = result.index;
             if i >= credentials.len() {
@@ -203,8 +206,10 @@ impl UsagePoller {
             if result.usage.is_some() {
                 stats.last_fetch = Some(Instant::now());
                 credentials[i].usage = result.usage;
+                updated = true;
             }
         }
+        updated
     }
 }
 

@@ -1,7 +1,11 @@
-use chrono::TimeZone;
+use std::collections::BTreeMap;
+
+use chrono::{Datelike, NaiveDate, TimeZone};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
+use crate::data::index::EventIndex;
+use crate::data::models::format_tokens;
 use crate::data::oauth::{OAuthCredential, UsageReport, UsageStats, UsageWindow};
 use crate::data::rate_limits::RateLimitHit;
 
@@ -76,7 +80,12 @@ fn gradient_bar_line<'a>(
 ) -> Line<'a> {
     let t = theme();
 
-    let label_text = format!("{:<7}{:>3.0}% ~{} ", label, pct, reset);
+    let reset_part = if reset.is_empty() {
+        String::new()
+    } else {
+        format!("~{}", reset)
+    };
+    let label_text = format!("{:<7}{:>3.0}% {:<12} ", label, pct, reset_part);
     let label_len = label_text.len();
 
     let bar_width = (total_width as usize).saturating_sub(label_len);
@@ -135,24 +144,27 @@ pub(crate) fn render(
     source_roots: &[Option<String>],
     credentials: &[OAuthCredential],
     selected: Option<usize>,
+    index: &EventIndex,
 ) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
+    // Left: rate limits table (full height) | Right: cards (top) + chart (bottom)
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(outer[0]);
 
     // Filter rate limits by the selected credential's source_root
-    let filtered_hits: Vec<&RateLimitHit> = match selected {
-        Some(i) if i < credentials.len() => {
-            let root = credentials[i].source_root.to_string_lossy().to_string();
-            hits.iter().filter(|h| h.source_root == root).collect()
-        }
-        _ => hits.iter().collect(),
+    let selected_root: Option<String> = selected
+        .filter(|&i| i < credentials.len())
+        .map(|i| credentials[i].source_root.to_string_lossy().to_string());
+
+    let filtered_hits: Vec<&RateLimitHit> = match &selected_root {
+        Some(root) => hits.iter().filter(|h| h.source_root == *root).collect(),
+        None => hits.iter().collect(),
     };
 
     // Build credential roots once so rate-limits table and cards share the same color mapping
@@ -162,10 +174,33 @@ pub(crate) fn render(
         .collect();
 
     render_rate_limits(frame, columns[0], &filtered_hits, source_names, source_roots, &credential_roots);
-    render_credential_cards(frame, columns[1], credentials, source_names, source_roots, selected, &credential_roots);
 
-    // Footer with key hints
+    // Right panel: cards (top) + chart (rest)
+    let right_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(count_card_height(credentials)), Constraint::Min(4)])
+        .split(columns[1]);
+
+    render_credential_cards(frame, right_rows[0], credentials, source_names, source_roots, selected, &credential_roots);
+
+    let selected_cred = selected.filter(|&i| i < credentials.len()).map(|i| &credentials[i]);
+    let bars = compute_session_bars(&filtered_hits, index, selected_root.as_deref(), selected_cred);
+    render_session_chart(frame, right_rows[1], &bars);
+
+    // Footer
     render_footer(frame, outer[1]);
+}
+
+fn count_card_height(credentials: &[OAuthCredential]) -> u16 {
+    if credentials.is_empty() {
+        return 4;
+    }
+    let max_gauges = credentials
+        .iter()
+        .map(|c| count_gauges(c.usage.as_ref()))
+        .max()
+        .unwrap_or(0);
+    (3 + max_gauges).max(4) as u16
 }
 
 fn count_gauges(usage: Option<&UsageReport>) -> usize {
@@ -336,7 +371,7 @@ fn render_compact_usage(
     ];
     let items: Vec<(&str, f64, String)> = windows
         .iter()
-        .filter_map(|(label, w)| w.map(|w| (*label, w.utilization, format_reset(&w.resets_at))))
+        .filter_map(|(label, w)| w.map(|w| (*label, w.utilization, w.resets_at.as_deref().map(format_reset).unwrap_or_default())))
         .collect();
 
     let mut constraints: Vec<Constraint> = Vec::new();
@@ -452,3 +487,319 @@ fn format_reset(iso: &str) -> String {
         })
         .unwrap_or_else(|_| iso.to_string())
 }
+
+// ---------------------------------------------------------------------------
+// Session token bar chart
+// ---------------------------------------------------------------------------
+
+struct DayBar {
+    date: NaiveDate,
+    tokens: u64,
+    is_current: bool,
+}
+
+/// Compute token bars: red for past rate-limited sessions, blue for current session.
+fn compute_session_bars(
+    hits: &[&RateLimitHit],
+    index: &EventIndex,
+    source_root: Option<&str>,
+    selected_cred: Option<&OAuthCredential>,
+) -> Vec<DayBar> {
+    let Some(root) = source_root else {
+        return Vec::new();
+    };
+
+    // Red bars: for each rate limit hit with duration, sum tokens in the session window
+    let mut day_tokens: BTreeMap<NaiveDate, u64> = BTreeMap::new();
+    for hit in hits {
+        let Some(dur_min) = hit.session_duration_min else {
+            continue;
+        };
+        let dur_secs = (dur_min * 60.0) as i64;
+        let session_start_utc = hit.timestamp - chrono::Duration::seconds(dur_secs);
+        let start_local = session_start_utc
+            .with_timezone(&chrono::Local)
+            .naive_local();
+        let end_local = hit
+            .timestamp
+            .with_timezone(&chrono::Local)
+            .naive_local();
+        let tokens = index.tokens_in_window(root, start_local, end_local);
+        let day = end_local.date();
+        *day_tokens.entry(day).or_default() += tokens;
+    }
+
+    let mut bars: Vec<DayBar> = day_tokens
+        .into_iter()
+        .map(|(date, tokens)| DayBar {
+            date,
+            tokens,
+            is_current: false,
+        })
+        .collect();
+
+    // Blue bar: estimated total token capacity for current 5h window.
+    // If we used X tokens and utilization is P%, estimated capacity = X / (P / 100).
+    if let Some(cred) = selected_cred {
+        if let Some(usage) = &cred.usage {
+            if let Some(five_h) = &usage.five_hour {
+                if let Some(resets_at_str) = &five_h.resets_at
+                    && let Ok(resets_at) = chrono::DateTime::parse_from_rfc3339(resets_at_str)
+                {
+                    let resets_utc = resets_at.with_timezone(&chrono::Utc);
+                    let session_start_utc = resets_utc - chrono::Duration::hours(5);
+                    let now_utc = chrono::Utc::now();
+                    let start_local = session_start_utc
+                        .with_timezone(&chrono::Local)
+                        .naive_local();
+                    let end_local = now_utc
+                        .with_timezone(&chrono::Local)
+                        .naive_local();
+                    let tokens = index.tokens_in_window(root, start_local, end_local);
+                    let utilization = five_h.utilization;
+                    let estimated_tokens = if utilization > 0.0 {
+                        (tokens as f64 / (utilization / 100.0)).round() as u64
+                    } else {
+                        tokens
+                    };
+                    if estimated_tokens > 0 {
+                        let today = chrono::Local::now().date_naive();
+                        // Remove any red bar for today (current session replaces it)
+                        bars.retain(|b| b.date != today);
+                        bars.push(DayBar {
+                            date: today,
+                            tokens: estimated_tokens,
+                            is_current: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Fill gaps: ensure every day from first to today has an entry
+    if !bars.is_empty() {
+        let today = chrono::Local::now().date_naive();
+        let first = bars[0].date;
+        let last = if today > bars.last().unwrap().date {
+            today
+        } else {
+            bars.last().unwrap().date
+        };
+        let existing: std::collections::HashSet<NaiveDate> =
+            bars.iter().map(|b| b.date).collect();
+        let mut d = first;
+        while d <= last {
+            if !existing.contains(&d) {
+                bars.push(DayBar {
+                    date: d,
+                    tokens: 0,
+                    is_current: false,
+                });
+            }
+            d += chrono::Duration::days(1);
+        }
+        bars.sort_by_key(|b| b.date);
+    }
+
+    bars
+}
+
+fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar]) {
+    let t = theme();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(t.border))
+        .title(Span::styled(
+            format!(" Session Tokens ({}) ", bars.len()),
+            Style::default()
+                .fg(t.heatmap_title)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if bars.is_empty() || inner.height < 3 || inner.width < 4 {
+        if inner.height >= 1 && inner.width >= 4 {
+            let msg = Paragraph::new(Span::styled("no data", Style::default().fg(t.text_dim)));
+            frame.render_widget(msg, inner);
+        }
+        return;
+    }
+
+    // Reserve 1 row for date labels, 1 for scale label
+    let chart_height = inner.height.saturating_sub(2) as usize;
+    if chart_height == 0 {
+        return;
+    }
+
+    let max_tokens = bars.iter().map(|b| b.tokens).max().unwrap_or(1).max(1);
+
+    let n = bars.len();
+    // Distribute full width evenly: each slot = total_width / n
+    // Bar fills slot minus 1 char gap (minimum bar width = 1)
+    let slot_w = (inner.width as usize / n).max(2);
+    let bar_w = (slot_w - 1).max(1) as u16;
+    let max_bars = inner.width as usize / slot_w;
+
+    let visible = &bars[bars.len().saturating_sub(max_bars)..];
+
+    let buf = frame.buffer_mut();
+    let red = Color::Rgb(220, 60, 60);
+    let blue = Color::Rgb(80, 170, 240);
+
+    for (i, bar) in visible.iter().enumerate() {
+        let x = inner.x + (i * slot_w) as u16;
+        if x + bar_w > inner.x + inner.width {
+            break;
+        }
+
+        let ratio = bar.tokens as f64 / max_tokens as f64;
+        let bar_h = (ratio * chart_height as f64).round().max(if bar.tokens > 0 { 1.0 } else { 0.0 }) as usize;
+        let color = if bar.is_current { blue } else { red };
+
+        // Draw bar from bottom to top
+        for dy in 0..bar_h.min(chart_height) {
+            let y = inner.y + chart_height as u16 - 1 - dy as u16;
+            for dx in 0..bar_w {
+                let cell = &mut buf[(x + dx, y)];
+                cell.set_char(' ');
+                cell.set_bg(color);
+            }
+        }
+
+        // Date label (day number)
+        let label_y = inner.y + chart_height as u16;
+        let label = format!("{:>2}", bar.date.day());
+        for (ci, ch) in label.chars().enumerate() {
+            let lx = x + ci as u16;
+            if lx < inner.x + inner.width && label_y < inner.y + inner.height {
+                let cell = &mut buf[(lx, label_y)];
+                cell.set_char(ch);
+                cell.set_fg(t.text_dim);
+            }
+        }
+
+        // Month label on first bar and when month changes
+        let show_month = i == 0
+            || (i > 0
+                && visible[i].date.month() != visible[i - 1].date.month());
+        if show_month {
+            let month_y = inner.y + chart_height as u16 + 1;
+            if month_y < inner.y + inner.height {
+                let month_label = bar.date.format("%b").to_string();
+                for (ci, ch) in month_label.chars().enumerate() {
+                    let lx = x + ci as u16;
+                    if lx < inner.x + inner.width {
+                        let cell = &mut buf[(lx, month_y)];
+                        cell.set_char(ch);
+                        cell.set_fg(t.text_secondary);
+                    }
+                }
+            }
+        }
+    }
+
+    // Scale label (top-right): show max token value
+    let scale_label = format_tokens(max_tokens);
+    let scale_y = inner.y;
+    let scale_x = inner.x + inner.width.saturating_sub(scale_label.len() as u16);
+    for (ci, ch) in scale_label.chars().enumerate() {
+        let lx = scale_x + ci as u16;
+        if lx < inner.x + inner.width && scale_y < inner.y + inner.height {
+            let cell = &mut buf[(lx, scale_y)];
+            cell.set_char(ch);
+            cell.set_fg(t.text_dim);
+        }
+    }
+
+    // Straight trend line overlay (linear regression on non-zero points only)
+    let nonzero: Vec<(f64, f64)> = visible
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.tokens > 0)
+        .map(|(i, b)| (i as f64, b.tokens as f64))
+        .collect();
+
+    if nonzero.len() >= 2 && chart_height >= 2 {
+        let max_val = max_tokens as f64;
+        let nn = nonzero.len() as f64;
+        let sum_x: f64 = nonzero.iter().map(|p| p.0).sum();
+        let sum_y: f64 = nonzero.iter().map(|p| p.1).sum();
+        let sum_xy: f64 = nonzero.iter().map(|p| p.0 * p.1).sum();
+        let sum_x2: f64 = nonzero.iter().map(|p| p.0 * p.0).sum();
+        let denom = nn * sum_x2 - sum_x * sum_x;
+        let (slope, intercept) = if denom.abs() > 1e-9 {
+            let s = (nn * sum_xy - sum_x * sum_y) / denom;
+            let i = (sum_y - s * sum_x) / nn;
+            (s, i)
+        } else {
+            (0.0, sum_y / nn)
+        };
+
+        let trend_color = t.cost;
+        let buf = frame.buffer_mut();
+        let chart_w = inner.width as usize;
+        let vn = visible.len();
+
+        // Braille: each cell is 2x4 dots, giving sub-character resolution
+        // Row of dots: 4 vertical per cell, so effective Y resolution = chart_height * 4
+        // Col of dots: 2 horizontal per cell, so effective X resolution = chart_w * 2
+        let dot_rows = chart_height * 4;
+        let dot_cols = chart_w * 2;
+
+        // Braille base: U+2800, dots indexed as:
+        //  0 3
+        //  1 4
+        //  2 5
+        //  6 7
+        const DOT_BITS: [u8; 8] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
+
+        // Collect which braille dots to set per cell
+        let mut braille_map: std::collections::HashMap<(u16, u16), u8> = std::collections::HashMap::new();
+
+        for dx in 0..dot_cols {
+            let data_x = if dot_cols > 1 {
+                dx as f64 / (dot_cols - 1) as f64 * (vn - 1) as f64
+            } else {
+                0.0
+            };
+            let trend_val = slope * data_x + intercept;
+            let ratio = trend_val / max_val;
+            if ratio < 0.0 || ratio > 1.0 {
+                continue;
+            }
+            let dy = ((1.0 - ratio) * (dot_rows - 1) as f64).round() as usize;
+
+            let cell_x = dx / 2;
+            let cell_y = dy / 4;
+            let sub_x = dx % 2;
+            let sub_y = dy % 4;
+            // Braille dot order: col0=[0,1,2,6] col1=[3,4,5,7]
+            let bit_idx = match (sub_x, sub_y) {
+                (0, r @ 0..=2) => r,
+                (0, 3) => 6,
+                (1, r @ 0..=2) => r + 3,
+                (1, 3) => 7,
+                _ => unreachable!(),
+            };
+
+            let cx = inner.x + cell_x as u16;
+            let cy = inner.y + cell_y as u16;
+            if cx < inner.x + inner.width && cy < inner.y + chart_height as u16 {
+                *braille_map.entry((cx, cy)).or_default() |= DOT_BITS[bit_idx];
+            }
+        }
+
+        for ((cx, cy), bits) in &braille_map {
+            let ch = char::from_u32(0x2800 + *bits as u32).unwrap_or('·');
+            let cell = &mut buf[(*cx, *cy)];
+            cell.set_char(ch);
+            cell.set_fg(trend_color);
+        }
+    }
+}
+

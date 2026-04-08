@@ -260,11 +260,13 @@ impl App {
     }
 
     pub(crate) fn handle_reload(&mut self) {
-        // Poll usage API for each credential on its own random timer
-        self.usage_poller
+        // Poll usage API for each credential on its own random timer.
+        // When usage is updated, also trigger a JSONL reload so that
+        // token counts and utilization percentages stay consistent.
+        let usage_updated = self.usage_poller
             .poll(&mut self.data.oauth_credentials);
 
-        if self.last_reload.elapsed() >= self.reload_interval && !self.reloading {
+        if (self.last_reload.elapsed() >= self.reload_interval || usage_updated) && !self.reloading {
             spawn_reload(
                 &self.config.raw_groups,
                 &self.config.session_map,

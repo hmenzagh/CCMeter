@@ -288,6 +288,51 @@ impl EventIndex {
     }
 
     // ------------------------------------------------------------------
+    // Token window query
+    // ------------------------------------------------------------------
+
+    /// Sum (input + output) tokens within a local time window for a given source root.
+    pub fn tokens_in_window(
+        &self,
+        source_root: &str,
+        start_local: chrono::NaiveDateTime,
+        end_local: chrono::NaiveDateTime,
+    ) -> u64 {
+        let Some(&root_idx) = self.root_intern.get(source_root) else {
+            return 0;
+        };
+        let start_date = start_local.date();
+        let end_date = end_local.date();
+        let start_min = start_local.hour() as u16 * 60 + start_local.minute() as u16;
+        let end_min = end_local.hour() as u16 * 60 + end_local.minute() as u16;
+
+        let mut total = 0u64;
+        for e in &self.entries {
+            if e.root_idx != root_idx {
+                continue;
+            }
+            if e.date < start_date || e.date > end_date {
+                continue;
+            }
+            if start_date == end_date {
+                if e.minute < start_min || e.minute > end_min {
+                    continue;
+                }
+            } else if e.date == start_date {
+                if e.minute < start_min {
+                    continue;
+                }
+            } else if e.date == end_date {
+                if e.minute > end_min {
+                    continue;
+                }
+            }
+            total += e.input_tokens + e.output_tokens;
+        }
+        total
+    }
+
+    // ------------------------------------------------------------------
     // Filter helpers
     // ------------------------------------------------------------------
 
