@@ -17,6 +17,8 @@ pub struct RateLimitHit {
     /// Session duration in minutes: time from first assistant message to this hit,
     /// considering only messages from the same source_root.
     pub session_duration_min: Option<f64>,
+    /// Total tokens consumed during this rate-limited session.
+    pub tokens: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +220,7 @@ pub fn discover_rate_limit_hits(source_roots: &[PathBuf]) -> Vec<RateLimitHit> {
                 message: raw.message,
                 source_root: root_str,
                 session_duration_min: duration,
+                tokens: 0,
             }
         })
         .collect();

@@ -12,6 +12,8 @@ use crate::data::cache;
 use crate::data::index::EventIndex;
 use crate::data::parser;
 use crate::data::oauth::{OAuthCredential, UsagePoller};
+use crate::data::hit_history::{self, HitHistory};
+use crate::data::rate_history::{self, RateHistory};
 use crate::data::rate_limits::RateLimitHit;
 use crate::data::tokens::{DailyTokens, MinuteTokens};
 use crate::ui::cards;
@@ -67,6 +69,8 @@ pub(crate) struct AppData {
     pub(crate) minute_tokens: MinuteTokens,
     pub(crate) rate_limit_hits: Vec<RateLimitHit>,
     pub(crate) oauth_credentials: Vec<OAuthCredential>,
+    pub(crate) rate_history: RateHistory,
+    pub(crate) hit_history: HitHistory,
 }
 
 /// Project configuration (discovery results + user overrides).
@@ -141,8 +145,15 @@ impl App {
         let minute_tokens = index.build_minute_tokens(None, None);
 
         let root_paths: Vec<std::path::PathBuf> = root_cwd_map.keys().cloned().collect();
-        let rate_limit_hits = crate::data::rate_limits::discover_rate_limit_hits(&root_paths);
+        let mut fresh_hits = crate::data::rate_limits::discover_rate_limit_hits(&root_paths);
+        compute_hit_tokens(&mut fresh_hits, &index);
+        let mut hit_history = hit_history::load();
+        let rate_limit_hits = hit_history.merge_fresh_hits(&fresh_hits);
+        if !fresh_hits.is_empty() {
+            hit_history::save(&hit_history);
+        }
         let oauth_credentials = crate::data::oauth::discover_credentials_with_usage(&root_paths);
+        let rate_history = rate_history::load();
 
         let mut overrides = Overrides::load();
         let groups = overrides::apply_overrides(&raw_groups, &mut overrides);
@@ -168,7 +179,7 @@ impl App {
         let (reload_tx, reload_rx) = mpsc::channel::<ReloadResult>();
         let usage_poller = UsagePoller::new(&oauth_credentials);
 
-        App {
+        let mut app = App {
             data: AppData {
                 merged_cache,
                 index,
@@ -177,6 +188,8 @@ impl App {
                 minute_tokens,
                 rate_limit_hits,
                 oauth_credentials,
+                rate_history,
+                hit_history,
             },
             config: AppConfig {
                 overrides,
@@ -202,7 +215,9 @@ impl App {
             last_reload: std::time::Instant::now(),
             reload_interval: Duration::from_secs(5 * 60),
             usage_poller,
-        }
+        };
+        app.record_rate_history();
+        app
     }
 
     // ------------------------------------------------------------------
@@ -246,6 +261,60 @@ impl App {
         self.render_dirty = false;
     }
 
+    /// Persist estimated token capacity for active 5h sessions into rate-history.
+    fn record_rate_history(&mut self) {
+        let today = Local::now().date_naive();
+        let mut changed = false;
+
+        for cred in &self.data.oauth_credentials {
+            let source_root = cred.source_root.to_string_lossy().to_string();
+            let Some(usage) = &cred.usage else {
+                continue;
+            };
+            let Some(five_h) = &usage.five_hour else {
+                continue;
+            };
+            let Some(resets_at_str) = &five_h.resets_at else {
+                continue;
+            };
+            let Ok(resets_at) = chrono::DateTime::parse_from_rfc3339(resets_at_str) else {
+                continue;
+            };
+
+            let utilization = five_h.utilization;
+            if utilization <= 0.0 {
+                continue;
+            }
+
+            let resets_utc = resets_at.with_timezone(&chrono::Utc);
+            let session_start_utc = resets_utc - chrono::Duration::hours(5);
+            let now_utc = chrono::Utc::now();
+            let start_local = session_start_utc
+                .with_timezone(&chrono::Local)
+                .naive_local();
+            let end_local = now_utc
+                .with_timezone(&chrono::Local)
+                .naive_local();
+            let tokens = self.data.index.tokens_in_window(&source_root, start_local, end_local);
+            if tokens == 0 {
+                continue;
+            }
+
+            let estimated_tokens = (tokens as f64 / (utilization / 100.0)).round() as u64;
+            self.data.rate_history.record(
+                &source_root,
+                resets_at_str,
+                estimated_tokens,
+                today,
+            );
+            changed = true;
+        }
+
+        if changed {
+            rate_history::save(&self.data.rate_history);
+        }
+    }
+
     // ------------------------------------------------------------------
     // Event loop helpers (called from main)
     // ------------------------------------------------------------------
@@ -283,6 +352,7 @@ impl App {
             self.data.index = idx;
             self.reloading = false;
             self.recompute_tokens();
+            self.record_rate_history();
         }
     }
 
@@ -483,6 +553,25 @@ fn build_render_cache(
         minute_model: stats.minute_costs,
         cards,
         range,
+    }
+}
+
+fn compute_hit_tokens(hits: &mut [RateLimitHit], index: &EventIndex) {
+    for hit in hits.iter_mut() {
+        let Some(dur_min) = hit.session_duration_min else {
+            continue;
+        };
+        let dur_secs = (dur_min * 60.0) as i64;
+        let session_start_utc = hit.timestamp - chrono::Duration::seconds(dur_secs);
+        let start_local = session_start_utc
+            .with_timezone(&chrono::Local)
+            .naive_local();
+        let end_local = hit
+            .timestamp
+            .with_timezone(&chrono::Local)
+            .naive_local();
+        let tokens = index.tokens_in_window(&hit.source_root, start_local, end_local);
+        hit.tokens = tokens;
     }
 }
 

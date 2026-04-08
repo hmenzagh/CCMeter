@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use crate::data::index::EventIndex;
 use crate::data::models::format_tokens;
 use crate::data::oauth::{OAuthCredential, UsageReport, UsageStats, UsageWindow};
+use crate::data::rate_history::RateHistory;
 use crate::data::rate_limits::RateLimitHit;
 
 use super::theme::theme;
@@ -145,6 +146,8 @@ pub(crate) fn render(
     credentials: &[OAuthCredential],
     selected: Option<usize>,
     index: &EventIndex,
+    rate_history: &RateHistory,
+    tick: usize,
 ) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -184,8 +187,8 @@ pub(crate) fn render(
     render_credential_cards(frame, right_rows[0], credentials, source_names, source_roots, selected, &credential_roots);
 
     let selected_cred = selected.filter(|&i| i < credentials.len()).map(|i| &credentials[i]);
-    let bars = compute_session_bars(&filtered_hits, index, selected_root.as_deref(), selected_cred);
-    render_session_chart(frame, right_rows[1], &bars);
+    let bars = compute_session_bars(&filtered_hits, index, selected_root.as_deref(), selected_cred, rate_history);
+    render_session_chart(frame, right_rows[1], &bars, tick);
 
     // Footer
     render_footer(frame, outer[1]);
@@ -492,54 +495,125 @@ fn format_reset(iso: &str) -> String {
 // Session token bar chart
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq)]
+enum BarKind {
+    /// Violet: historical average from rate-history (no rate-limit hit that day).
+    History,
+    /// Red: historical average from rate-history, only sessions that hit the limit.
+    RateLimited,
+    /// Blue: current live session (always last bar).
+    Current,
+}
+
 struct DayBar {
     date: NaiveDate,
     tokens: u64,
-    is_current: bool,
+    kind: BarKind,
 }
 
-/// Compute token bars: red for past rate-limited sessions, blue for current session.
+/// Compute token bars:
+/// - Violet/Red bars from rate-history (one per day, averaged).
+///   Red if at least one rate-limit hit that day, violet otherwise.
+/// - Blue bar for the current live session (always appended last).
 fn compute_session_bars(
     hits: &[&RateLimitHit],
     index: &EventIndex,
     source_root: Option<&str>,
     selected_cred: Option<&OAuthCredential>,
+    rate_history: &RateHistory,
 ) -> Vec<DayBar> {
     let Some(root) = source_root else {
         return Vec::new();
     };
 
-    // Red bars: for each rate limit hit with duration, sum tokens in the session window
-    let mut day_tokens: BTreeMap<NaiveDate, u64> = BTreeMap::new();
+    let mut rate_limited_days: std::collections::HashSet<NaiveDate> =
+        std::collections::HashSet::new();
+    let mut rate_limited_tokens: BTreeMap<NaiveDate, Vec<u64>> = BTreeMap::new();
     for hit in hits {
-        let Some(dur_min) = hit.session_duration_min else {
-            continue;
-        };
-        let dur_secs = (dur_min * 60.0) as i64;
-        let session_start_utc = hit.timestamp - chrono::Duration::seconds(dur_secs);
-        let start_local = session_start_utc
-            .with_timezone(&chrono::Local)
-            .naive_local();
-        let end_local = hit
+        let day = hit
             .timestamp
             .with_timezone(&chrono::Local)
-            .naive_local();
-        let tokens = index.tokens_in_window(root, start_local, end_local);
-        let day = end_local.date();
-        *day_tokens.entry(day).or_default() += tokens;
+            .naive_local()
+            .date();
+        rate_limited_days.insert(day);
+        if hit.tokens > 0 {
+            rate_limited_tokens.entry(day).or_default().push(hit.tokens);
+        }
     }
 
-    let mut bars: Vec<DayBar> = day_tokens
-        .into_iter()
-        .map(|(date, tokens)| DayBar {
-            date,
-            tokens,
-            is_current: false,
-        })
+    let entries = rate_history.entries_for_root(root);
+
+    let mut day_entries: BTreeMap<NaiveDate, Vec<u64>> = BTreeMap::new();
+    for entry in &entries {
+        day_entries
+            .entry(entry.date)
+            .or_default()
+            .push(entry.estimated_tokens);
+    }
+
+    let mut bars: Vec<DayBar> = Vec::new();
+
+    let all_dates: std::collections::BTreeSet<NaiveDate> = day_entries
+        .keys()
+        .chain(rate_limited_days.iter())
+        .copied()
         .collect();
 
-    // Blue bar: estimated total token capacity for current 5h window.
-    // If we used X tokens and utilization is P%, estimated capacity = X / (P / 100).
+    for date in all_dates {
+        if rate_limited_days.contains(&date) {
+            // Red bar: average of rate-limited session tokens
+            let tokens_list = rate_limited_tokens.get(&date);
+            if let Some(list) = tokens_list {
+                if !list.is_empty() {
+                    let avg = list.iter().sum::<u64>() / list.len() as u64;
+                    bars.push(DayBar {
+                        date,
+                        tokens: avg,
+                        kind: BarKind::RateLimited,
+                    });
+                    continue;
+                }
+            }
+            // Fallback: if rate-limit hit but no token data from hits, use history
+            if let Some(list) = day_entries.get(&date) {
+                let avg = list.iter().sum::<u64>() / list.len() as u64;
+                bars.push(DayBar {
+                    date,
+                    tokens: avg,
+                    kind: BarKind::RateLimited,
+                });
+            }
+        } else if let Some(list) = day_entries.get(&date) {
+            // Violet bar: average of all history entries for that day
+            let avg = list.iter().sum::<u64>() / list.len() as u64;
+            bars.push(DayBar {
+                date,
+                tokens: avg,
+                kind: BarKind::History,
+            });
+        }
+    }
+
+    // Fill gaps: ensure every day from first to last has an entry
+    if !bars.is_empty() {
+        let first = bars[0].date;
+        let last = bars.last().unwrap().date;
+        let existing: std::collections::HashSet<NaiveDate> =
+            bars.iter().map(|b| b.date).collect();
+        let mut d = first;
+        while d <= last {
+            if !existing.contains(&d) {
+                bars.push(DayBar {
+                    date: d,
+                    tokens: 0,
+                    kind: BarKind::History,
+                });
+            }
+            d += chrono::Duration::days(1);
+        }
+        bars.sort_by_key(|b| b.date);
+    }
+
     if let Some(cred) = selected_cred {
         if let Some(usage) = &cred.usage {
             if let Some(five_h) = &usage.five_hour {
@@ -557,78 +631,69 @@ fn compute_session_bars(
                         .naive_local();
                     let tokens = index.tokens_in_window(root, start_local, end_local);
                     let utilization = five_h.utilization;
-                    let estimated_tokens = if utilization > 0.0 {
-                        (tokens as f64 / (utilization / 100.0)).round() as u64
-                    } else {
-                        tokens
-                    };
-                    if estimated_tokens > 0 {
-                        let today = chrono::Local::now().date_naive();
-                        // Remove any red bar for today (current session replaces it)
-                        bars.retain(|b| b.date != today);
-                        bars.push(DayBar {
-                            date: today,
-                            tokens: estimated_tokens,
-                            is_current: true,
-                        });
+                    if tokens > 0 && utilization > 0.0 {
+                        let estimated_tokens =
+                            (tokens as f64 / (utilization / 100.0)).round() as u64;
+                        if estimated_tokens > 0 {
+                            let today = chrono::Local::now().date_naive();
+                            bars.push(DayBar {
+                                date: today,
+                                tokens: estimated_tokens,
+                                kind: BarKind::Current,
+                            });
+                        }
                     }
                 }
             }
         }
     }
 
-    // Fill gaps: ensure every day from first to today has an entry
-    if !bars.is_empty() {
-        let today = chrono::Local::now().date_naive();
-        let first = bars[0].date;
-        let last = if today > bars.last().unwrap().date {
-            today
-        } else {
-            bars.last().unwrap().date
-        };
-        let existing: std::collections::HashSet<NaiveDate> =
-            bars.iter().map(|b| b.date).collect();
-        let mut d = first;
-        while d <= last {
-            if !existing.contains(&d) {
-                bars.push(DayBar {
-                    date: d,
-                    tokens: 0,
-                    is_current: false,
-                });
-            }
-            d += chrono::Duration::days(1);
-        }
-        bars.sort_by_key(|b| b.date);
-    }
-
     bars
 }
 
-fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar]) {
+fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], tick: usize) {
     let t = theme();
+    let (star, star_style) = super::theme::star_span(tick);
+
+    let red = Color::Rgb(220, 60, 60);
+    let blue = Color::Rgb(80, 170, 240);
+    let violet = Color::Rgb(160, 100, 220);
+
+    let title = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(star, star_style),
+        Span::styled(" Max usage graph ", Style::default().fg(t.heatmap_title).add_modifier(Modifier::BOLD)),
+        Span::styled("██", Style::default().fg(violet)),
+        Span::styled(" history ", Style::default().fg(t.text_dim)),
+        Span::styled("██", Style::default().fg(red)),
+        Span::styled(" hit ", Style::default().fg(t.text_dim)),
+        Span::styled("██", Style::default().fg(blue)),
+        Span::styled(" live ", Style::default().fg(t.text_dim)),
+    ]);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(t.border))
-        .title(Span::styled(
-            format!(" Session Tokens ({}) ", bars.len()),
-            Style::default()
-                .fg(t.heatmap_title)
-                .add_modifier(Modifier::BOLD),
-        ));
+        .title(title);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if bars.is_empty() || inner.height < 3 || inner.width < 4 {
+    if bars.is_empty() || inner.height < 4 || inner.width < 4 {
         if inner.height >= 1 && inner.width >= 4 {
             let msg = Paragraph::new(Span::styled("no data", Style::default().fg(t.text_dim)));
             frame.render_widget(msg, inner);
         }
         return;
     }
+
+    // Empty row between title and chart
+    let inner = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
 
     // Reserve 1 row for date labels, 1 for scale label
     let chart_height = inner.height.saturating_sub(2) as usize;
@@ -646,20 +711,23 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar]) {
     let max_bars = inner.width as usize / slot_w;
 
     let visible = &bars[bars.len().saturating_sub(max_bars)..];
-
+    let total_chart_w = visible.len() * slot_w;
+    let x_offset = (inner.width as usize).saturating_sub(total_chart_w) / 2;
     let buf = frame.buffer_mut();
-    let red = Color::Rgb(220, 60, 60);
-    let blue = Color::Rgb(80, 170, 240);
 
     for (i, bar) in visible.iter().enumerate() {
-        let x = inner.x + (i * slot_w) as u16;
+        let x = inner.x + x_offset as u16 + (i * slot_w) as u16;
         if x + bar_w > inner.x + inner.width {
             break;
         }
 
         let ratio = bar.tokens as f64 / max_tokens as f64;
         let bar_h = (ratio * chart_height as f64).round().max(if bar.tokens > 0 { 1.0 } else { 0.0 }) as usize;
-        let color = if bar.is_current { blue } else { red };
+        let color = match bar.kind {
+            BarKind::Current => blue,
+            BarKind::RateLimited => red,
+            BarKind::History => violet,
+        };
 
         // Draw bar from bottom to top
         for dy in 0..bar_h.min(chart_height) {
@@ -716,11 +784,10 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar]) {
         }
     }
 
-    // Straight trend line overlay (linear regression on non-zero points only)
     let nonzero: Vec<(f64, f64)> = visible
         .iter()
         .enumerate()
-        .filter(|(_, b)| b.tokens > 0)
+        .filter(|(_, b)| b.tokens > 0 && b.kind != BarKind::Current)
         .map(|(i, b)| (i as f64, b.tokens as f64))
         .collect();
 
@@ -742,7 +809,7 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar]) {
 
         let trend_color = t.cost;
         let buf = frame.buffer_mut();
-        let chart_w = inner.width as usize;
+        let chart_w = total_chart_w;
         let vn = visible.len();
 
         // Braille: each cell is 2x4 dots, giving sub-character resolution
@@ -787,7 +854,7 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar]) {
                 _ => unreachable!(),
             };
 
-            let cx = inner.x + cell_x as u16;
+            let cx = inner.x + x_offset as u16 + cell_x as u16;
             let cy = inner.y + cell_y as u16;
             if cx < inner.x + inner.width && cy < inner.y + chart_height as u16 {
                 *braille_map.entry((cx, cy)).or_default() |= DOT_BITS[bit_idx];

@@ -1,7 +1,9 @@
 pub mod cache;
+pub mod hit_history;
 pub mod index;
 pub mod models;
 pub mod oauth;
 pub mod parser;
+pub mod rate_history;
 pub mod rate_limits;
 pub mod tokens;

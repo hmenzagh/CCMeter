@@ -19,6 +19,7 @@ impl App {
         let area = frame.area();
 
         if matches!(self.view, View::Landing) {
+            let tick = (self.start_time.elapsed().as_millis() / 150) as usize;
             landing::render(
                 frame,
                 area,
@@ -28,6 +29,8 @@ impl App {
                 &self.data.oauth_credentials,
                 Some(self.landing_selected),
                 &self.data.index,
+                &self.data.rate_history,
+                tick,
             );
             return;
         }
