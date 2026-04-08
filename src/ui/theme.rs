@@ -1,4 +1,4 @@
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 
 pub struct Theme {
     // ── Chrome / UI ──────────────────────────────────────────────────
@@ -150,4 +150,21 @@ impl Theme {
             _ => self.model_other,
         }
     }
+}
+
+const STAR_FRAMES: [&str; 10] = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
+
+/// Returns the star character and its pulsing style for the given tick.
+/// Tick should be computed as `(elapsed_ms / 150) as usize`.
+pub fn star_span(tick: usize) -> (&'static str, Style) {
+    let t = theme();
+    let len = STAR_FRAMES.len();
+    let star = STAR_FRAMES[tick % len];
+    let pulse = ((tick % len) as f32 / (len - 1) as f32 * std::f32::consts::PI).sin();
+    let (sr, sg, sb) = t.star_base;
+    let (ar, ag, ab) = t.star_amplitude;
+    let r = sr + (ar * pulse) as u8;
+    let g = sg + (ag * pulse) as u8;
+    let b = sb + (ab * pulse) as u8;
+    (star, Style::default().fg(Color::Rgb(r, g, b)))
 }
