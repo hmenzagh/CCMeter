@@ -10,6 +10,8 @@ pub struct Settings {
     pub expanded_heatmap: bool,
     #[serde(default)]
     pub time_filter: Option<TimeFilter>,
+    #[serde(default)]
+    pub last_view: Option<String>,
 }
 
 impl Settings {

@@ -9,8 +9,12 @@ use crate::config::discovery;
 use crate::config::overrides::{self, Overrides};
 use crate::config::settings::Settings;
 use crate::data::cache;
+use crate::data::hit_history::{self, HitHistory};
 use crate::data::index::EventIndex;
+use crate::data::oauth::{OAuthCredential, UsagePoller};
 use crate::data::parser;
+use crate::data::rate_history::{self, RateHistory};
+use crate::data::rate_limits::RateLimitHit;
 use crate::data::tokens::{DailyTokens, MinuteTokens};
 use crate::ui::cards;
 use crate::ui::heatmap;
@@ -23,6 +27,7 @@ use crate::update_check::{self, UpdateInfo};
 // ---------------------------------------------------------------------------
 
 pub(crate) enum View {
+    RateTracking,
     Main,
     Settings(Box<SettingsState>),
 }
@@ -63,6 +68,11 @@ pub(crate) struct AppData {
     pub(crate) daily_tokens: DailyTokens,
     pub(crate) thresholds: heatmap::Thresholds,
     pub(crate) minute_tokens: MinuteTokens,
+    pub(crate) rate_limit_hits: Vec<RateLimitHit>,
+    pub(crate) oauth_credentials: Vec<OAuthCredential>,
+    pub(crate) rate_history: RateHistory,
+    #[allow(dead_code)]
+    pub(crate) hit_history: HitHistory,
 }
 
 /// Project configuration (discovery results + user overrides).
@@ -104,6 +114,7 @@ pub(crate) struct App {
 
     pub(crate) render_dirty: bool,
     pub(crate) card_scroll: usize,
+    pub(crate) rate_tracking_selected: usize,
 
     pub(crate) reloading: bool,
     reload_tx: mpsc::Sender<ReloadResult>,
@@ -111,6 +122,9 @@ pub(crate) struct App {
 
     pub(crate) start_time: std::time::Instant,
     pub(crate) last_reload: std::time::Instant,
+
+    usage_poller: UsagePoller,
+    #[allow(dead_code)]
     pub(crate) reload_interval: Duration,
 
     pub(crate) update_info: Option<UpdateInfo>,
@@ -139,6 +153,17 @@ impl App {
         let (daily_tokens, thresholds) = compute_daily_and_thresholds(&merged_cache, None, None);
         let minute_tokens = index.build_minute_tokens(None, None);
 
+        let root_paths: Vec<std::path::PathBuf> = root_cwd_map.keys().cloned().collect();
+        let mut fresh_hits = crate::data::rate_limits::discover_rate_limit_hits(&root_paths);
+        compute_hit_tokens(&mut fresh_hits, &index);
+        let mut hit_history = hit_history::load();
+        let rate_limit_hits = hit_history.merge_fresh_hits(&fresh_hits);
+        if !fresh_hits.is_empty() {
+            hit_history::save(&hit_history);
+        }
+        let oauth_credentials = crate::data::oauth::discover_credentials_with_usage(&root_paths);
+        let rate_history = rate_history::load();
+
         let mut overrides = Overrides::load();
         let groups = overrides::apply_overrides(&raw_groups, &mut overrides);
         let (source_names, source_roots) = build_source_list(&root_cwd_map);
@@ -146,6 +171,10 @@ impl App {
         let project_index: Option<usize> = None;
         let settings = Settings::load();
         let time_filter = settings.time_filter.unwrap_or(TimeFilter::All);
+        let initial_view = match settings.last_view.as_deref() {
+            Some("rate_tracking") => View::RateTracking,
+            _ => View::Main, // includes "main" and any unknown value
+        };
 
         let cwds_filter = project_cwds_static(&groups, project_index);
 
@@ -162,15 +191,20 @@ impl App {
         );
 
         let (reload_tx, reload_rx) = mpsc::channel::<ReloadResult>();
+        let usage_poller = UsagePoller::new(&oauth_credentials);
         let update_rx = update_check::spawn_check();
 
-        App {
+        let mut app = App {
             data: AppData {
                 merged_cache,
                 index,
                 daily_tokens,
                 thresholds,
                 minute_tokens,
+                rate_limit_hits,
+                oauth_credentials,
+                rate_history,
+                hit_history,
             },
             config: AppConfig {
                 overrides,
@@ -182,21 +216,25 @@ impl App {
                 source_roots,
             },
             render,
-            view: View::Main,
+            view: initial_view,
             time_filter,
             source_index,
             project_index,
             render_dirty: false,
             card_scroll: 0,
+            rate_tracking_selected: 0,
             reloading: false,
             reload_tx,
             reload_rx,
             start_time: std::time::Instant::now(),
             last_reload: std::time::Instant::now(),
+            usage_poller,
             reload_interval: Duration::from_secs(5 * 60),
             update_info: None,
             update_rx,
-        }
+        };
+        app.record_rate_history();
+        app
     }
 
     // ------------------------------------------------------------------
@@ -218,7 +256,6 @@ impl App {
         );
         self.data.daily_tokens = d;
         self.data.thresholds = t;
-        let source_root = self.config.source_roots[self.source_index].as_deref();
         self.data.minute_tokens = self
             .data
             .index
@@ -250,6 +287,67 @@ impl App {
         self.render_dirty = false;
     }
 
+    /// Persist estimated token capacity for active 5h sessions into rate-history.
+    fn record_rate_history(&mut self) {
+        let today = Local::now().date_naive();
+        let mut changed = false;
+
+        for cred in &self.data.oauth_credentials {
+            let source_root = cred.source_root.to_string_lossy().to_string();
+            let Some(usage) = &cred.usage else {
+                continue;
+            };
+            let Some(five_h) = &usage.five_hour else {
+                continue;
+            };
+            let Some(resets_at_str) = &five_h.resets_at else {
+                continue;
+            };
+            let Ok(resets_at) = chrono::DateTime::parse_from_rfc3339(resets_at_str) else {
+                continue;
+            };
+
+            let utilization = five_h.utilization;
+            if utilization <= 0.0 {
+                continue;
+            }
+
+            let resets_utc = resets_at.with_timezone(&chrono::Utc);
+            let session_start_utc = resets_utc - chrono::Duration::hours(5);
+            let now_utc = chrono::Utc::now();
+
+            // Skip recording when the session is too young (< 30 min):
+            // the estimate is unstable because local tokens and API
+            // utilization don't update at the same rate.
+            let elapsed_min = (now_utc - session_start_utc).num_seconds().max(0) as f64 / 60.0;
+            if elapsed_min < 30.0 || utilization < 2.0 {
+                continue;
+            }
+
+            let start_local = session_start_utc
+                .with_timezone(&chrono::Local)
+                .naive_local();
+            let end_local = now_utc.with_timezone(&chrono::Local).naive_local();
+            let tokens = self
+                .data
+                .index
+                .tokens_in_window(&source_root, start_local, end_local);
+            if tokens == 0 {
+                continue;
+            }
+
+            let estimated_tokens = (tokens as f64 / (utilization / 100.0)).round() as u64;
+            self.data
+                .rate_history
+                .record(&source_root, resets_at_str, estimated_tokens, today);
+            changed = true;
+        }
+
+        if changed {
+            rate_history::save(&self.data.rate_history);
+        }
+    }
+
     // ------------------------------------------------------------------
     // Event loop helpers (called from main)
     // ------------------------------------------------------------------
@@ -268,8 +366,27 @@ impl App {
         }
     }
 
+    fn switch_view(&mut self, view: View) {
+        let key = match &view {
+            View::RateTracking => "rate_tracking",
+            View::Main => "main",
+            View::Settings(_) => return,
+        };
+        self.view = view;
+        self.render_dirty = true;
+        self.config.settings.last_view = Some(key.to_string());
+        self.config.settings.save();
+    }
+
     pub(crate) fn handle_reload(&mut self) {
-        if self.last_reload.elapsed() >= self.reload_interval && !self.reloading {
+        // Poll usage API for each credential on its own random timer.
+        // A JSONL reload is triggered only after a successful usage poll.
+        let usage_updated = self.usage_poller.poll(&mut self.data.oauth_credentials);
+
+        if usage_updated
+            && !self.reloading
+            && self.last_reload.elapsed() >= Duration::from_millis(500)
+        {
             spawn_reload(
                 &self.config.raw_groups,
                 &self.config.session_map,
@@ -286,6 +403,7 @@ impl App {
             self.data.index = idx;
             self.reloading = false;
             self.recompute_tokens();
+            self.record_rate_history();
         }
     }
 
@@ -299,8 +417,8 @@ impl App {
             return false;
         }
 
-        // Tab/BackTab cycle time filters globally, except in Settings where Tab switches tabs.
-        if !matches!(self.view, View::Settings(_)) {
+        // Tab/BackTab cycle time filters globally, except in Settings/RateTracking.
+        if !matches!(self.view, View::Settings(_) | View::RateTracking) {
             match key.code {
                 KeyCode::Tab => {
                     self.time_filter = self.time_filter.next();
@@ -321,6 +439,28 @@ impl App {
         }
 
         match &mut self.view {
+            View::RateTracking => match key.code {
+                KeyCode::Char('`') => {
+                    self.switch_view(View::Main);
+                }
+                KeyCode::Char('q') => return false,
+                KeyCode::Right | KeyCode::Char('l') => {
+                    let n = self.data.oauth_credentials.len();
+                    if n > 0 {
+                        self.rate_tracking_selected = (self.rate_tracking_selected + 1) % n;
+                    }
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    let n = self.data.oauth_credentials.len();
+                    if n > 0 {
+                        self.rate_tracking_selected = (self.rate_tracking_selected + n - 1) % n;
+                    }
+                }
+                KeyCode::Char('r') if !self.reloading => {
+                    self.usage_poller.force_poll_all();
+                }
+                _ => {}
+            },
             View::Main => match key.code {
                 KeyCode::Esc if self.project_index.is_some() => {
                     self.project_index = None;
@@ -328,14 +468,11 @@ impl App {
                     self.recompute_tokens();
                 }
                 KeyCode::Char('q') => return false,
+                KeyCode::Char('`') => {
+                    self.switch_view(View::RateTracking);
+                }
                 KeyCode::Char('r') if !self.reloading => {
-                    spawn_reload(
-                        &self.config.raw_groups,
-                        &self.config.session_map,
-                        &self.reload_tx,
-                    );
-                    self.reloading = true;
-                    self.last_reload = std::time::Instant::now();
+                    self.usage_poller.force_poll_all();
                 }
                 KeyCode::Char('.') => {
                     self.view = View::Settings(Box::new(SettingsState::new(&self.config.groups)));
@@ -500,6 +637,22 @@ fn build_render_cache(
         cards,
         range,
         display_order,
+    }
+}
+
+fn compute_hit_tokens(hits: &mut [RateLimitHit], index: &EventIndex) {
+    for hit in hits.iter_mut() {
+        let Some(dur_min) = hit.session_duration_min else {
+            continue;
+        };
+        let dur_secs = (dur_min * 60.0) as i64;
+        let session_start_utc = hit.timestamp - chrono::Duration::seconds(dur_secs);
+        let start_local = session_start_utc
+            .with_timezone(&chrono::Local)
+            .naive_local();
+        let end_local = hit.timestamp.with_timezone(&chrono::Local).naive_local();
+        let tokens = index.tokens_in_window(&hit.source_root, start_local, end_local);
+        hit.tokens = tokens;
     }
 }
 

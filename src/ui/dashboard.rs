@@ -5,6 +5,7 @@ use ratatui::{
 
 use super::cards;
 use super::heatmap;
+use super::rate_tracking;
 use super::theme::theme;
 use super::time_filter::TimeFilter;
 use crate::app::{App, View};
@@ -16,6 +17,24 @@ use crate::app::{App, View};
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+
+        if matches!(self.view, View::RateTracking) {
+            let tick = (self.start_time.elapsed().as_millis() / 150) as usize;
+            rate_tracking::render(
+                frame,
+                area,
+                &self.data.rate_limit_hits,
+                &self.config.source_names,
+                &self.config.source_roots,
+                &self.data.oauth_credentials,
+                Some(self.rate_tracking_selected),
+                &self.data.index,
+                &self.data.rate_history,
+                self.reloading,
+                tick,
+            );
+            return;
+        }
 
         let has_update = self.update_info.is_some();
         let outer = Layout::default()
@@ -74,6 +93,7 @@ impl App {
             self.draw_too_small_popup(frame, content_area, MIN_WIDTH, MIN_HEIGHT);
         } else {
             match &self.view {
+                View::RateTracking => unreachable!(),
                 View::Main => self.draw_main_dashboard(frame, content_area),
                 View::Settings(state) => {
                     state.render(
@@ -96,9 +116,9 @@ impl App {
         let footer_text = if self.reloading {
             "⟳ Reloading…"
         } else if self.project_index.is_some() {
-            "Esc Back   Tab Period   ←→ Project   r Reload   q Quit"
+            "Esc Back   Tab Period   ←→ Project   r Reload   ` Rate tracking   q Quit"
         } else {
-            "Tab Period   ⇧Tab Source   ←→ Project   ↑↓ Scroll   r Reload   . Settings   q Quit"
+            "Tab Period   ⇧Tab Source   ←→ Project   ↑↓ Scroll   r Reload   ` Rate tracking   . Settings   q Quit"
         };
         let footer = Paragraph::new(Span::styled(
             footer_text,

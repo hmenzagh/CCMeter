@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.0-beta.1] - 2026-04-09
+
+### Added
+- Rate limit tracking view with real-time usage monitoring for Claude OAuth accounts
+
 ## [1.4.1] - 2026-04-09
 
 ### Added
