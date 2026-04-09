@@ -167,11 +167,7 @@ pub fn discover_rate_limit_hits(source_roots: &[PathBuf]) -> Vec<RateLimitHit> {
     sorted.sort_by_key(|(h, _)| h.timestamp);
     for pair in sorted {
         let ts = pair.0.timestamp;
-        let bucket = format!(
-            "{}-{:02}",
-            ts.format("%Y-%m-%dT%H"),
-            ts.minute() / 15 * 15,
-        );
+        let bucket = format!("{}-{:02}", ts.format("%Y-%m-%dT%H"), ts.minute() / 15 * 15,);
         let key = (pair.1.clone(), bucket);
         if seen.insert(key) {
             deduped.push(pair);
@@ -185,9 +181,7 @@ pub fn discover_rate_limit_hits(source_roots: &[PathBuf]) -> Vec<RateLimitHit> {
     // Pre-cache first assistant timestamp per file (avoids reopening files per-hit)
     let file_first_ts: std::collections::HashMap<PathBuf, DateTime<Utc>> = file_root_pairs
         .par_iter()
-        .filter_map(|(path, _)| {
-            first_assistant_timestamp(path).map(|ts| (path.clone(), ts))
-        })
+        .filter_map(|(path, _)| first_assistant_timestamp(path).map(|ts| (path.clone(), ts)))
         .collect();
 
     // Group cached timestamps by source root
@@ -205,16 +199,14 @@ pub fn discover_rate_limit_hits(source_roots: &[PathBuf]) -> Vec<RateLimitHit> {
     let mut hits: Vec<RateLimitHit> = deduped
         .into_iter()
         .map(|(raw, root_str)| {
-            let duration = ts_by_root
-                .get(root_str.as_str())
-                .and_then(|timestamps| {
-                    let window_start = raw.timestamp - chrono::Duration::hours(5);
-                    timestamps
-                        .iter()
-                        .filter(|ts| **ts >= window_start && **ts <= raw.timestamp)
-                        .min()
-                        .map(|first| (raw.timestamp - *first).num_seconds() as f64 / 60.0)
-                });
+            let duration = ts_by_root.get(root_str.as_str()).and_then(|timestamps| {
+                let window_start = raw.timestamp - chrono::Duration::hours(5);
+                timestamps
+                    .iter()
+                    .filter(|ts| **ts >= window_start && **ts <= raw.timestamp)
+                    .min()
+                    .map(|first| (raw.timestamp - *first).num_seconds() as f64 / 60.0)
+            });
             RateLimitHit {
                 timestamp: raw.timestamp,
                 message: raw.message,
@@ -250,7 +242,8 @@ mod tests {
     use std::io::Write;
 
     fn make_tmp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ccmeter_test_{}_{}", std::process::id(), name));
+        let dir =
+            std::env::temp_dir().join(format!("ccmeter_test_{}_{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

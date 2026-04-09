@@ -9,10 +9,10 @@ use crate::config::discovery;
 use crate::config::overrides::{self, Overrides};
 use crate::config::settings::Settings;
 use crate::data::cache;
-use crate::data::index::EventIndex;
-use crate::data::parser;
-use crate::data::oauth::{OAuthCredential, UsagePoller};
 use crate::data::hit_history::{self, HitHistory};
+use crate::data::index::EventIndex;
+use crate::data::oauth::{OAuthCredential, UsagePoller};
+use crate::data::parser;
 use crate::data::rate_history::{self, RateHistory};
 use crate::data::rate_limits::RateLimitHit;
 use crate::data::tokens::{DailyTokens, MinuteTokens};
@@ -71,6 +71,7 @@ pub(crate) struct AppData {
     pub(crate) rate_limit_hits: Vec<RateLimitHit>,
     pub(crate) oauth_credentials: Vec<OAuthCredential>,
     pub(crate) rate_history: RateHistory,
+    #[allow(dead_code)]
     pub(crate) hit_history: HitHistory,
 }
 
@@ -123,6 +124,7 @@ pub(crate) struct App {
     pub(crate) last_reload: std::time::Instant,
 
     usage_poller: UsagePoller,
+    #[allow(dead_code)]
     pub(crate) reload_interval: Duration,
 
     pub(crate) update_info: Option<UpdateInfo>,
@@ -325,21 +327,19 @@ impl App {
             let start_local = session_start_utc
                 .with_timezone(&chrono::Local)
                 .naive_local();
-            let end_local = now_utc
-                .with_timezone(&chrono::Local)
-                .naive_local();
-            let tokens = self.data.index.tokens_in_window(&source_root, start_local, end_local);
+            let end_local = now_utc.with_timezone(&chrono::Local).naive_local();
+            let tokens = self
+                .data
+                .index
+                .tokens_in_window(&source_root, start_local, end_local);
             if tokens == 0 {
                 continue;
             }
 
             let estimated_tokens = (tokens as f64 / (utilization / 100.0)).round() as u64;
-            self.data.rate_history.record(
-                &source_root,
-                resets_at_str,
-                estimated_tokens,
-                today,
-            );
+            self.data
+                .rate_history
+                .record(&source_root, resets_at_str, estimated_tokens, today);
             changed = true;
         }
 
@@ -381,8 +381,7 @@ impl App {
     pub(crate) fn handle_reload(&mut self) {
         // Poll usage API for each credential on its own random timer.
         // A JSONL reload is triggered only after a successful usage poll.
-        let usage_updated = self.usage_poller
-            .poll(&mut self.data.oauth_credentials);
+        let usage_updated = self.usage_poller.poll(&mut self.data.oauth_credentials);
 
         if usage_updated
             && !self.reloading
@@ -651,10 +650,7 @@ fn compute_hit_tokens(hits: &mut [RateLimitHit], index: &EventIndex) {
         let start_local = session_start_utc
             .with_timezone(&chrono::Local)
             .naive_local();
-        let end_local = hit
-            .timestamp
-            .with_timezone(&chrono::Local)
-            .naive_local();
+        let end_local = hit.timestamp.with_timezone(&chrono::Local).naive_local();
         let tokens = index.tokens_in_window(&hit.source_root, start_local, end_local);
         hit.tokens = tokens;
     }

@@ -88,9 +88,11 @@ impl RateHistory {
         date: NaiveDate,
     ) {
         let bucket = bucket_resets_at(resets_at);
-        if let Some(existing) = self.entries.iter_mut().find(|e| {
-            e.source_root == source_root && e.bucket == bucket
-        }) {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.source_root == source_root && e.bucket == bucket)
+        {
             existing.estimated_tokens = estimated_tokens;
             existing.resets_at = resets_at.to_string();
             existing.date = date;
