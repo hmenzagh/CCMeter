@@ -27,9 +27,7 @@ fn update_banner_renders() {
                     let color = rainbow[(i + tick) % rainbow.len()];
                     Span::styled(
                         String::from(ch),
-                        Style::default()
-                            .fg(color)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
                     )
                 })
                 .collect();
