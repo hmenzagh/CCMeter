@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.4.1] - 2026-04-09
+
+### Added
+- Update notification banner: checks GitHub releases on startup and displays a rainbow-animated alert when a newer version is available
+
 ## [1.4.0] - 2026-04-09
 
 ### Added

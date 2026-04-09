@@ -17,16 +17,31 @@ impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
 
+        let has_update = self.update_info.is_some();
         let outer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
+            .constraints(if has_update {
+                vec![
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ]
+            } else {
+                vec![
+                    Constraint::Length(1),
+                    Constraint::Length(0),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ]
+            })
             .split(area);
 
-        self.draw_footer(frame, outer[2]);
+        self.draw_footer(frame, outer[3]);
+
+        if let Some(info) = &self.update_info {
+            self.draw_update_banner(frame, outer[1], info);
+        }
 
         // Replace time-filter / source tabs with a plain title in settings view
         if matches!(self.view, View::Settings(_)) {
@@ -52,7 +67,7 @@ impl App {
             self.draw_header(frame, &top_cols);
         }
 
-        let content_area = outer[1];
+        let content_area = outer[2];
         const MIN_WIDTH: u16 = 50;
         const MIN_HEIGHT: u16 = 30;
         if content_area.width < MIN_WIDTH || content_area.height < MIN_HEIGHT {
@@ -153,6 +168,37 @@ impl App {
                 top_cols[2],
             );
         }
+    }
+
+    fn draw_update_banner(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        info: &crate::update_check::UpdateInfo,
+    ) {
+        let t = theme();
+        let tick = (self.start_time.elapsed().as_millis() / 100) as usize;
+        let rainbow = &t.rainbow;
+
+        let rainbow_text = format!("\u{2b06} v{}", info.latest_version);
+        let mut spans: Vec<Span> = rainbow_text
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| {
+                let color = rainbow[(i + tick) % rainbow.len()];
+                Span::styled(
+                    String::from(ch),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect();
+        spans.push(Span::styled(
+            " available",
+            Style::default().fg(t.text_dim),
+        ));
+
+        let line = Line::from(spans);
+        frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
     }
 
     fn draw_too_small_popup(&self, frame: &mut Frame, area: Rect, min_w: u16, min_h: u16) {

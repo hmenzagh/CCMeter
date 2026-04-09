@@ -16,6 +16,7 @@ use crate::ui::cards;
 use crate::ui::heatmap;
 use crate::ui::settings_view::{KeyResult, SettingsState};
 use crate::ui::time_filter::{TimeFilter, date_in_filter, filter_daily};
+use crate::update_check::{self, UpdateInfo};
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -111,6 +112,9 @@ pub(crate) struct App {
     pub(crate) start_time: std::time::Instant,
     pub(crate) last_reload: std::time::Instant,
     pub(crate) reload_interval: Duration,
+
+    pub(crate) update_info: Option<UpdateInfo>,
+    update_rx: mpsc::Receiver<UpdateInfo>,
 }
 
 impl App {
@@ -158,6 +162,7 @@ impl App {
         );
 
         let (reload_tx, reload_rx) = mpsc::channel::<ReloadResult>();
+        let update_rx = update_check::spawn_check();
 
         App {
             data: AppData {
@@ -189,6 +194,8 @@ impl App {
             start_time: std::time::Instant::now(),
             last_reload: std::time::Instant::now(),
             reload_interval: Duration::from_secs(5 * 60),
+            update_info: None,
+            update_rx,
         }
     }
 
@@ -250,6 +257,11 @@ impl App {
     pub(crate) fn pre_render(&mut self) {
         if let View::Settings(state) = &mut self.view {
             state.tick = (self.start_time.elapsed().as_millis() / 80) as usize;
+        }
+        if self.update_info.is_none() {
+            if let Ok(info) = self.update_rx.try_recv() {
+                self.update_info = Some(info);
+            }
         }
         if self.render_dirty {
             self.recompute_render_cache();
