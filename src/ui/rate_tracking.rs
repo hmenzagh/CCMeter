@@ -1253,12 +1253,7 @@ fn render_usage_timeline(
         }
     }
 
-    // Trim trailing empty buckets so the graph only extends to the last
-    // data point rather than advancing with wall-clock time.
-    let last_nonzero = buckets.iter().rposition(|&v| v > 0).unwrap_or(0);
-    let n_buckets = last_nonzero + 1;
     let buckets = &buckets[..n_buckets];
-    let total_minutes = (n_buckets as u16) * bucket_min;
 
     // Scale label (top-right)
     let max_val = buckets.iter().cloned().max().unwrap_or(0).max(1);
@@ -1379,7 +1374,13 @@ fn render_usage_timeline(
         let offset_min = (col as f64 / chart_w as f64 * total_minutes as f64) as u16;
         let abs_minute = (start_minute + offset_min) % 1440;
         let label = format!("{:02}:{:02}", abs_minute / 60, abs_minute % 60);
-        let lx = inner.x + col as u16;
+        // Shift last label left so it doesn't get clipped
+        let label_len = label.len() as u16;
+        let lx = if inner.x + col as u16 + label_len > inner.x + inner.width {
+            (inner.x + inner.width).saturating_sub(label_len)
+        } else {
+            inner.x + col as u16
+        };
         for (ci, ch) in label.chars().enumerate() {
             let x = lx + ci as u16;
             if x < inner.x + inner.width && x_row < inner.y + inner.height {
@@ -1510,15 +1511,23 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], _tick: u
             }
         }
 
-        // Date label (day number)
+        // Date label (day number) — skip labels when bars are too narrow
+        // A day label is 2 chars wide; show every Nth label so they don't overlap
+        let label_step = if slot_w >= 3 {
+            1
+        } else {
+            3_usize.div_ceil(slot_w)
+        };
         let label_y = inner.y + chart_height as u16;
-        let label = format!("{:>2}", bar.date.day());
-        for (ci, ch) in label.chars().enumerate() {
-            let lx = x + ci as u16;
-            if lx < inner.x + inner.width && label_y < inner.y + inner.height {
-                let cell = &mut buf[(lx, label_y)];
-                cell.set_char(ch);
-                cell.set_fg(t.text_dim);
+        if i % label_step == 0 {
+            let label = format!("{:>2}", bar.date.day());
+            for (ci, ch) in label.chars().enumerate() {
+                let lx = x + ci as u16;
+                if lx < inner.x + inner.width && label_y < inner.y + inner.height {
+                    let cell = &mut buf[(lx, label_y)];
+                    cell.set_char(ch);
+                    cell.set_fg(t.text_dim);
+                }
             }
         }
 
