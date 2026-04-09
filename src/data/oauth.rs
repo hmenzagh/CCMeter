@@ -37,7 +37,7 @@ pub struct UsageReport {
 }
 
 /// Debug / display stats for usage polling.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UsageStats {
     /// Total successful API calls.
     pub call_count: u32,
@@ -45,16 +45,6 @@ pub struct UsageStats {
     pub rate_limit_count: u32,
     /// When the last successful fetch happened.
     pub last_fetch: Option<Instant>,
-}
-
-impl Default for UsageStats {
-    fn default() -> Self {
-        Self {
-            call_count: 0,
-            rate_limit_count: 0,
-            last_fetch: None,
-        }
-    }
 }
 
 impl UsageStats {
@@ -80,6 +70,7 @@ pub struct OAuthCredential {
     /// Which source root this credential belongs to (e.g. `~/.claude/projects`).
     pub source_root: PathBuf,
     pub subscription_type: Option<String>,
+    #[allow(dead_code)]
     pub rate_limit_tier: Option<String>,
     pub expires_at: Option<u64>,
     /// The access token (kept for API calls).
@@ -237,9 +228,7 @@ fn fetch_usage_raw(token: &str) -> (Option<UsageReport>, bool) {
             (usage, false)
         }
         Err(e) => {
-            let is_429 = e
-                .to_string()
-                .contains("429");
+            let is_429 = e.to_string().contains("429");
             (None, is_429)
         }
     }
@@ -255,9 +244,7 @@ pub fn discover_credentials_with_usage(source_roots: &[PathBuf]) -> Vec<OAuthCre
     let mut creds = discover_credentials(source_roots);
     creds.par_iter_mut().for_each(|cred| {
         if cred.access_token.is_some() && !cred.is_expired() {
-            let (usage, _) = fetch_usage_raw(
-                cred.access_token.as_deref().unwrap(),
-            );
+            let (usage, _) = fetch_usage_raw(cred.access_token.as_deref().unwrap());
             if usage.is_some() {
                 cred.stats.last_fetch = Some(Instant::now());
                 cred.stats.call_count += 1;
@@ -317,9 +304,9 @@ struct OAuthEntry {
     rate_limit_tier: Option<String>,
 }
 
-fn new_credential(oauth: OAuthEntry, source_root: &PathBuf) -> OAuthCredential {
+fn new_credential(oauth: OAuthEntry, source_root: &Path) -> OAuthCredential {
     OAuthCredential {
-        source_root: source_root.clone(),
+        source_root: source_root.to_path_buf(),
         subscription_type: oauth.subscription_type,
         rate_limit_tier: oauth.rate_limit_tier,
         expires_at: oauth.expires_at,
@@ -329,7 +316,7 @@ fn new_credential(oauth: OAuthEntry, source_root: &PathBuf) -> OAuthCredential {
     }
 }
 
-fn try_credentials_file(parent: &Path, source_root: &PathBuf) -> Option<OAuthCredential> {
+fn try_credentials_file(parent: &Path, source_root: &Path) -> Option<OAuthCredential> {
     let cred_path = parent.join(".credentials.json");
     let content = std::fs::read_to_string(&cred_path).ok()?;
     let parsed: CredentialsFile = serde_json::from_str(&content).ok()?;
@@ -337,7 +324,7 @@ fn try_credentials_file(parent: &Path, source_root: &PathBuf) -> Option<OAuthCre
 }
 
 #[cfg(target_os = "macos")]
-fn try_keychain(parent: &Path, source_root: &PathBuf) -> Option<OAuthCredential> {
+fn try_keychain(parent: &Path, source_root: &Path) -> Option<OAuthCredential> {
     let service = keychain_service_name(parent);
 
     let output = std::process::Command::new("security")

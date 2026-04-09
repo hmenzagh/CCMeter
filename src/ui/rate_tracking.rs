@@ -19,10 +19,10 @@ fn source_display_name<'a>(
     source_roots: &[Option<String>],
 ) -> &'a str {
     for (i, root) in source_roots.iter().enumerate() {
-        if let Some(r) = root {
-            if r == source_root {
-                return &source_names[i];
-            }
+        if let Some(r) = root
+            && r == source_root
+        {
+            return &source_names[i];
         }
     }
     source_root
@@ -142,6 +142,7 @@ fn util_color(pct: f64) -> Color {
 // Layout
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     frame: &mut Frame,
     area: Rect,
@@ -756,19 +757,19 @@ fn compute_session_bars(
         if rate_limited_days.contains(&date) {
             // Red bar: average of rate-limited session tokens
             let tokens_list = rate_limited_tokens.get(&date);
-            if let Some(list) = tokens_list {
-                if !list.is_empty() {
-                    let avg = list.iter().sum::<u64>() / list.len() as u64;
-                    let (inp, out) = split_tokens(date, avg);
-                    bars.push(DayBar {
-                        date,
-                        tokens: avg,
-                        input_tokens: inp,
-                        output_tokens: out,
-                        kind: BarKind::RateLimited,
-                    });
-                    continue;
-                }
+            if let Some(list) = tokens_list
+                && !list.is_empty()
+            {
+                let avg = list.iter().sum::<u64>() / list.len() as u64;
+                let (inp, out) = split_tokens(date, avg);
+                bars.push(DayBar {
+                    date,
+                    tokens: avg,
+                    input_tokens: inp,
+                    output_tokens: out,
+                    kind: BarKind::RateLimited,
+                });
+                continue;
             }
             // Fallback: if rate-limit hit but no token data from hits, use history
             if let Some(list) = day_entries.get(&date) {
@@ -817,44 +818,40 @@ fn compute_session_bars(
         bars.sort_by_key(|b| b.date);
     }
 
-    if let Some(cred) = selected_cred {
-        if let Some(usage) = &cred.usage {
-            if let Some(five_h) = &usage.five_hour {
-                if let Some(resets_at_str) = &five_h.resets_at
-                    && let Ok(resets_at) = chrono::DateTime::parse_from_rfc3339(resets_at_str)
-                {
-                    let resets_utc = resets_at.with_timezone(&chrono::Utc);
-                    let session_start_utc = resets_utc - chrono::Duration::hours(5);
-                    let now_utc = chrono::Utc::now();
+    if let Some(cred) = selected_cred
+        && let Some(usage) = &cred.usage
+        && let Some(five_h) = &usage.five_hour
+        && let Some(resets_at_str) = &five_h.resets_at
+        && let Ok(resets_at) = chrono::DateTime::parse_from_rfc3339(resets_at_str)
+    {
+        let resets_utc = resets_at.with_timezone(&chrono::Utc);
+        let session_start_utc = resets_utc - chrono::Duration::hours(5);
+        let now_utc = chrono::Utc::now();
 
-                    let elapsed_min =
-                        (now_utc - session_start_utc).num_seconds().max(0) as f64 / 60.0;
-                    let utilization = five_h.utilization;
+        let elapsed_min = (now_utc - session_start_utc).num_seconds().max(0) as f64 / 60.0;
+        let utilization = five_h.utilization;
 
-                    if elapsed_min >= 30.0 || utilization >= 2.0 {
-                        let start_local = session_start_utc
-                            .with_timezone(&chrono::Local)
-                            .naive_local();
-                        let end_local = now_utc.with_timezone(&chrono::Local).naive_local();
-                        let (inp, out) = index.tokens_in_window_split(root, start_local, end_local);
-                        let tokens = inp + out;
-                        if tokens > 0 {
-                            let scale = 1.0 / (utilization / 100.0);
-                            let estimated_tokens = (tokens as f64 * scale).round() as u64;
-                            let estimated_in = (inp as f64 * scale).round() as u64;
-                            let estimated_out = estimated_tokens.saturating_sub(estimated_in);
-                            if estimated_tokens > 0 {
-                                let today = chrono::Local::now().date_naive();
-                                bars.push(DayBar {
-                                    date: today,
-                                    tokens: estimated_tokens,
-                                    input_tokens: estimated_in,
-                                    output_tokens: estimated_out,
-                                    kind: BarKind::Current,
-                                });
-                            }
-                        }
-                    }
+        if elapsed_min >= 30.0 || utilization >= 2.0 {
+            let start_local = session_start_utc
+                .with_timezone(&chrono::Local)
+                .naive_local();
+            let end_local = now_utc.with_timezone(&chrono::Local).naive_local();
+            let (inp, out) = index.tokens_in_window_split(root, start_local, end_local);
+            let tokens = inp + out;
+            if tokens > 0 {
+                let scale = 1.0 / (utilization / 100.0);
+                let estimated_tokens = (tokens as f64 * scale).round() as u64;
+                let estimated_in = (inp as f64 * scale).round() as u64;
+                let estimated_out = estimated_tokens.saturating_sub(estimated_in);
+                if estimated_tokens > 0 {
+                    let today = chrono::Local::now().date_naive();
+                    bars.push(DayBar {
+                        date: today,
+                        tokens: estimated_tokens,
+                        input_tokens: estimated_in,
+                        output_tokens: estimated_out,
+                        kind: BarKind::Current,
+                    });
                 }
             }
         }
@@ -956,7 +953,7 @@ fn render_session_forecast(
     // Compute recent token rate (last 30 min or session duration, whichever is shorter)
     let today = now_local.date_naive();
     let now_minute = now_local.hour() as u16 * 60 + now_local.minute() as u16;
-    let sample_window = (elapsed_min as u16).min(30).max(1);
+    let sample_window = (elapsed_min as u16).clamp(1, 30);
     let sample_start = now_minute.saturating_sub(sample_window);
 
     let mut recent_tokens: u64 = 0;
@@ -965,11 +962,10 @@ fn render_session_forecast(
         .iter()
         .chain(minute_tokens.output.iter())
     {
-        if date == today && minute >= sample_start && minute <= now_minute {
-            recent_tokens += val;
-        } else if date == today.pred_opt().unwrap_or(today)
-            && sample_start > now_minute
-            && minute >= sample_start
+        if (date == today && minute >= sample_start && minute <= now_minute)
+            || (date == today.pred_opt().unwrap_or(today)
+                && sample_start > now_minute
+                && minute >= sample_start)
         {
             recent_tokens += val;
         }
@@ -1113,7 +1109,7 @@ fn render_session_forecast(
     let mut status_spans: Vec<Span> = Vec::new();
     // Blink the dot for critical status
     let dot_visible = if rate_ratio >= 0.95 {
-        (tick / 3) % 2 == 0
+        (tick / 3).is_multiple_of(2)
     } else {
         true
     };
@@ -1226,7 +1222,7 @@ fn render_usage_timeline(
     }
 
     let bucket_min: u16 = 2;
-    let n_buckets = ((total_minutes + bucket_min - 1) / bucket_min).max(1) as usize;
+    let n_buckets = total_minutes.div_ceil(bucket_min).max(1) as usize;
 
     let mut buckets = vec![0u64; n_buckets];
     for (&(date, minute), &val) in minute_tokens
@@ -1612,7 +1608,7 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], _tick: u
             };
             let trend_val = slope * data_x + intercept;
             let ratio = trend_val / max_val;
-            if ratio < 0.0 || ratio > 1.0 {
+            if !(0.0..=1.0).contains(&ratio) {
                 continue;
             }
             let dy = ((1.0 - ratio) * (dot_rows - 1) as f64).round() as usize;
