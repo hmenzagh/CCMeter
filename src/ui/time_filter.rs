@@ -55,15 +55,24 @@ impl TimeFilter {
         )
     }
 
-    /// Minute-of-day cutoff for sub-day filters. Returns `None` for Today and
-    /// non-intraday filters (they use full-day data).
-    pub(crate) fn minute_cutoff(&self) -> Option<u16> {
+    /// Returns `(start_date, start_minute)` for sub-day filters that need
+    /// minute-level filtering. Correctly crosses midnight when the window
+    /// extends into the previous day. Returns `None` for Today and non-intraday
+    /// filters (they use full-day data).
+    pub(crate) fn subday_start(&self) -> Option<(NaiveDate, u16)> {
         let now = chrono::Local::now();
+        let today = now.date_naive();
         let current_minute = now.hour() as u16 * 60 + now.minute() as u16;
-        match self {
-            TimeFilter::Hour1 => Some(current_minute.saturating_sub(60)),
-            TimeFilter::Hour12 => Some(current_minute.saturating_sub(720)),
-            _ => None,
+        let offset = match self {
+            TimeFilter::Hour1 => 60u16,
+            TimeFilter::Hour12 => 720u16,
+            _ => return None,
+        };
+        if current_minute >= offset {
+            Some((today, current_minute - offset))
+        } else {
+            let yesterday = today - chrono::Duration::days(1);
+            Some((yesterday, 1440 - (offset - current_minute)))
         }
     }
 
@@ -115,11 +124,20 @@ impl DatePredicate {
                 end: NaiveDate::MAX,
                 all: true,
             },
-            TimeFilter::Today | TimeFilter::Hour1 | TimeFilter::Hour12 => Self {
+            TimeFilter::Today => Self {
                 start: today,
                 end: today,
                 all: false,
             },
+            TimeFilter::Hour1 | TimeFilter::Hour12 => {
+                // Include yesterday if the window crosses midnight.
+                let start = filter.subday_start().map(|(d, _)| d).unwrap_or(today);
+                Self {
+                    start,
+                    end: today,
+                    all: false,
+                }
+            }
             TimeFilter::LastWeek => Self {
                 start: today - chrono::Duration::days(6),
                 end: today,
