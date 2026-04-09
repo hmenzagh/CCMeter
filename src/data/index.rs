@@ -157,22 +157,24 @@ impl EventIndex {
 
         let entries: Vec<CompactEntry> = agg
             .into_iter()
-            .map(|((root_idx, cwd_idx, model, date, minute), a)| CompactEntry {
-                root_idx,
-                cwd_idx,
-                model,
-                date,
-                minute,
-                input_tokens: a.input,
-                output_tokens: a.output,
-                cache_read: a.cache_read,
-                cache_creation: a.cache_creation,
-                cost: a.cost,
-                lines_accepted: a.lines_accepted,
-                lines_suggested: a.lines_suggested,
-                lines_added: a.lines_added,
-                lines_deleted: a.lines_deleted,
-            })
+            .map(
+                |((root_idx, cwd_idx, model, date, minute), a)| CompactEntry {
+                    root_idx,
+                    cwd_idx,
+                    model,
+                    date,
+                    minute,
+                    input_tokens: a.input,
+                    output_tokens: a.output,
+                    cache_read: a.cache_read,
+                    cache_creation: a.cache_creation,
+                    cost: a.cost,
+                    lines_accepted: a.lines_accepted,
+                    lines_suggested: a.lines_suggested,
+                    lines_added: a.lines_added,
+                    lines_deleted: a.lines_deleted,
+                },
+            )
             .collect();
 
         EventIndex {
@@ -261,10 +263,10 @@ impl EventIndex {
                 continue;
             }
             // Sub-day filtering: skip entries outside the minute window.
-            if let Some(mm) = min_minute {
-                if e.minute < mm {
-                    continue;
-                }
+            if let Some(mm) = min_minute
+                && e.minute < mm
+            {
+                continue;
             }
             let rk_idx = match cwd_to_rk.get(&e.cwd_idx) {
                 Some(&idx) => idx,
@@ -326,7 +328,7 @@ impl EventIndex {
     /// `min_minute`. `active_minutes` is estimated from the distinct minutes
     /// present in the filtered window.
     pub fn build_subday_cache(&self, today: NaiveDate, min_minute: u16) -> super::cache::Cache {
-        use super::cache::{Cache, DayEntry};
+        use super::cache::Cache;
 
         let mut cache = Cache::new();
         let date_str = today.format("%Y-%m-%d").to_string();
@@ -347,7 +349,7 @@ impl EventIndex {
                 .entry(cwd.clone())
                 .or_default()
                 .entry(date_str.clone())
-                .or_insert_with(DayEntry::default);
+                .or_default();
 
             day_entry.input += e.input_tokens;
             day_entry.output += e.output_tokens;

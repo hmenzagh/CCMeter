@@ -132,10 +132,25 @@ impl MinuteTokens {
         let mut dt = DailyTokens::default();
         fold_u64(&self.input, &mut dt.input, today, min_minute);
         fold_u64(&self.output, &mut dt.output, today, min_minute);
-        fold_u64(&self.lines_suggested, &mut dt.lines_suggested, today, min_minute);
-        fold_u64(&self.lines_accepted, &mut dt.lines_accepted, today, min_minute);
+        fold_u64(
+            &self.lines_suggested,
+            &mut dt.lines_suggested,
+            today,
+            min_minute,
+        );
+        fold_u64(
+            &self.lines_accepted,
+            &mut dt.lines_accepted,
+            today,
+            min_minute,
+        );
         fold_u64(&self.lines_added, &mut dt.lines_added, today, min_minute);
-        fold_u64(&self.lines_deleted, &mut dt.lines_deleted, today, min_minute);
+        fold_u64(
+            &self.lines_deleted,
+            &mut dt.lines_deleted,
+            today,
+            min_minute,
+        );
         for (&(date, minute), &val) in &self.cost {
             if date == today && minute >= min_minute {
                 *dt.cost.entry(date).or_default() += val;
