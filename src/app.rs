@@ -415,12 +415,12 @@ fn build_render_cache(
     time_filter: TimeFilter,
 ) -> RenderCache {
     let today_snap = Local::now().date_naive();
-    let min_minute = time_filter.minute_cutoff();
+    let subday = time_filter.subday_start();
 
     // For sub-day filters (1H, 12H), build DailyTokens from minute-level data
     // so that KPI values reflect the actual time window.
-    let filtered = if let Some(mm) = min_minute {
-        minute_tokens.to_daily_filtered(today_snap, mm)
+    let filtered = if let Some((sd, sm)) = subday {
+        minute_tokens.to_daily_filtered(sd, sm, today_snap)
     } else {
         filter_daily(daily_tokens, time_filter)
     };
@@ -434,14 +434,14 @@ fn build_render_cache(
         &date_filter,
         project_cwds,
         time_filter.is_intraday(),
-        min_minute,
+        subday,
     );
 
     // For sub-day filters, build a cache from the index filtered by minute
     // so that card costs reflect the actual time window.
     let effective_cache;
-    let cache_ref = if let Some(mm) = min_minute {
-        effective_cache = index.build_subday_cache(today_snap, mm);
+    let cache_ref = if let Some((sd, sm)) = subday {
+        effective_cache = index.build_subday_cache(sd, sm, today_snap);
         &effective_cache
     } else {
         merged_cache

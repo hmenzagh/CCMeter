@@ -227,7 +227,7 @@ impl EventIndex {
         date_filter: &impl Fn(NaiveDate) -> bool,
         project_cwds: Option<&[String]>,
         include_minute: bool,
-        min_minute: Option<u16>,
+        subday_start: Option<(NaiveDate, u16)>,
     ) -> ModelStats {
         let root_filter = source_root.and_then(|sr| self.root_intern.get(sr).copied());
         let cwd_filter = project_cwds.map(|cwds| self.cwd_set(cwds));
@@ -262,9 +262,10 @@ impl EventIndex {
             if !date_filter(e.date) {
                 continue;
             }
-            // Sub-day filtering: skip entries outside the minute window.
-            if let Some(mm) = min_minute
-                && e.minute < mm
+            // Sub-day filtering: skip entries before the start (date, minute).
+            if let Some((sd, sm)) = subday_start
+                && e.date == sd
+                && e.minute < sm
             {
                 continue;
             }
@@ -324,31 +325,40 @@ impl EventIndex {
         }
     }
 
-    /// Build a [`Cache`] containing only entries for `today` whose minute >=
-    /// `min_minute`. `active_minutes` is estimated from the distinct minutes
-    /// present in the filtered window.
-    pub fn build_subday_cache(&self, today: NaiveDate, min_minute: u16) -> super::cache::Cache {
+    /// Build a [`Cache`] containing only entries within the window
+    /// `[start_date:start_minute .. end_date:*]`. Correctly handles windows
+    /// that cross midnight. `active_minutes` is estimated from the distinct
+    /// minutes present in the filtered window.
+    pub fn build_subday_cache(
+        &self,
+        start_date: NaiveDate,
+        start_minute: u16,
+        end_date: NaiveDate,
+    ) -> super::cache::Cache {
         use super::cache::Cache;
 
         let mut cache = Cache::new();
-        let date_str = today.format("%Y-%m-%d").to_string();
         let roots = &self.roots;
 
-        // Collect distinct active minutes per (root, cwd) for active_minutes estimation.
-        let mut active_minutes_map: HashMap<(u16, u16), Vec<u16>> = HashMap::new();
+        // Collect distinct active minutes per (root, cwd, date) for active_minutes estimation.
+        let mut active_minutes_map: HashMap<(u16, u16, NaiveDate), Vec<u16>> = HashMap::new();
 
         for e in &self.entries {
-            if e.date != today || e.minute < min_minute {
+            if e.date < start_date || e.date > end_date {
+                continue;
+            }
+            if e.date == start_date && e.minute < start_minute {
                 continue;
             }
             let root = &roots[e.root_idx as usize];
             let cwd = &self.cwds[e.cwd_idx as usize];
+            let date_str = e.date.format("%Y-%m-%d").to_string();
 
             let day_entry = cache
                 .entry_root(root.clone())
                 .entry(cwd.clone())
                 .or_default()
-                .entry(date_str.clone())
+                .entry(date_str)
                 .or_default();
 
             day_entry.input += e.input_tokens;
@@ -362,18 +372,19 @@ impl EventIndex {
             day_entry.lines_deleted += e.lines_deleted;
 
             active_minutes_map
-                .entry((e.root_idx, e.cwd_idx))
+                .entry((e.root_idx, e.cwd_idx, e.date))
                 .or_default()
                 .push(e.minute);
         }
 
         // Estimate active_minutes using the same clustering approach as the main cache.
-        for ((root_idx, cwd_idx), mut minutes) in active_minutes_map {
+        for ((root_idx, cwd_idx, date), mut minutes) in active_minutes_map {
             minutes.sort();
             minutes.dedup();
             let active = super::cache::cluster_active_minutes(&minutes);
             let root = &roots[root_idx as usize];
             let cwd = &self.cwds[cwd_idx as usize];
+            let date_str = date.format("%Y-%m-%d").to_string();
             if let Some(day_entry) = cache
                 .get_root_mut(root)
                 .and_then(|cwd_map| cwd_map.get_mut(cwd))
