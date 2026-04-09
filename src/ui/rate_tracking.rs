@@ -32,10 +32,7 @@ fn source_display_name<'a>(
 }
 
 fn source_color_index(source_root: &str, all_roots: &[String]) -> usize {
-    all_roots
-        .iter()
-        .position(|r| r == source_root)
-        .unwrap_or(0)
+    all_roots.iter().position(|r| r == source_root).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -49,23 +46,23 @@ fn gradient_color(position_ratio: f64) -> Color {
     let (r, g, b) = if position_ratio < 0.33 {
         let t = position_ratio / 0.33;
         (
-            80.0 + t * 140.0,  // 80 → 220
-            200.0 + t * 0.0,   // 200 → 200
-            80.0 - t * 40.0,   // 80 → 40
+            80.0 + t * 140.0, // 80 → 220
+            200.0 + t * 0.0,  // 200 → 200
+            80.0 - t * 40.0,  // 80 → 40
         )
     } else if position_ratio < 0.66 {
         let t = (position_ratio - 0.33) / 0.33;
         (
-            220.0,              // 220
-            200.0 - t * 60.0,  // 200 → 140
-            40.0,               // 40
+            220.0,            // 220
+            200.0 - t * 60.0, // 200 → 140
+            40.0,             // 40
         )
     } else {
         let t = (position_ratio - 0.66) / 0.34;
         (
-            220.0,              // 220
-            140.0 - t * 90.0,  // 140 → 50
-            40.0 + t * 10.0,   // 40 → 50
+            220.0,            // 220
+            140.0 - t * 90.0, // 140 → 50
+            40.0 + t * 10.0,  // 40 → 50
         )
     };
     Color::Rgb(r as u8, g as u8, b as u8)
@@ -92,21 +89,28 @@ fn gradient_bar_line<'a>(
 
     let bar_width = (total_width as usize).saturating_sub(label_len);
     if bar_width == 0 {
-        return Line::from(Span::styled(label_text, Style::default().fg(t.text_primary)));
+        return Line::from(Span::styled(
+            label_text,
+            Style::default().fg(t.text_primary),
+        ));
     }
 
     let mut spans: Vec<Span<'a>> = Vec::with_capacity(bar_width + 2);
-    spans.push(Span::styled(label_text, Style::default().fg(t.text_primary)));
+    spans.push(Span::styled(
+        label_text,
+        Style::default().fg(t.text_primary),
+    ));
 
     let filled = (ratio * bar_width as f64) as usize;
 
     // Filled cells with gradient
     for i in 0..filled.min(bar_width) {
-        let pos = if bar_width > 1 { i as f64 / (bar_width - 1) as f64 } else { 0.0 };
-        spans.push(Span::styled(
-            " ",
-            Style::default().bg(gradient_color(pos)),
-        ));
+        let pos = if bar_width > 1 {
+            i as f64 / (bar_width - 1) as f64
+        } else {
+            0.0
+        };
+        spans.push(Span::styled(" ", Style::default().bg(gradient_color(pos))));
     }
 
     // Empty remainder
@@ -178,7 +182,14 @@ pub(crate) fn render(
         .map(|c| c.source_root.to_string_lossy().to_string())
         .collect();
 
-    render_rate_limits(frame, columns[0], &filtered_hits, source_names, source_roots, &credential_roots);
+    render_rate_limits(
+        frame,
+        columns[0],
+        &filtered_hits,
+        source_names,
+        source_roots,
+        &credential_roots,
+    );
 
     // Right panel: cards + KPIs + forecast + usage timeline + max usage chart
     let right_rows = Layout::default()
@@ -192,15 +203,43 @@ pub(crate) fn render(
         ])
         .split(columns[1]);
 
-    render_credential_cards(frame, right_rows[0], credentials, source_names, source_roots, selected, &credential_roots);
+    render_credential_cards(
+        frame,
+        right_rows[0],
+        credentials,
+        source_names,
+        source_roots,
+        selected,
+        &credential_roots,
+    );
 
-    let selected_cred = selected.filter(|&i| i < credentials.len()).map(|i| &credentials[i]);
-    let bars = compute_session_bars(&filtered_hits, index, selected_root.as_deref(), selected_cred, rate_history);
+    let selected_cred = selected
+        .filter(|&i| i < credentials.len())
+        .map(|i| &credentials[i]);
+    let bars = compute_session_bars(
+        &filtered_hits,
+        index,
+        selected_root.as_deref(),
+        selected_cred,
+        rate_history,
+    );
     render_kpi_bar(frame, right_rows[1], &bars, &filtered_hits);
 
     let selected_minute_tokens = index.build_minute_tokens(selected_root.as_deref(), None);
-    render_session_forecast(frame, right_rows[2], selected_cred, &selected_minute_tokens, tick);
-    render_usage_timeline(frame, right_rows[3], &selected_minute_tokens, selected_cred, tick);
+    render_session_forecast(
+        frame,
+        right_rows[2],
+        selected_cred,
+        &selected_minute_tokens,
+        tick,
+    );
+    render_usage_timeline(
+        frame,
+        right_rows[3],
+        &selected_minute_tokens,
+        selected_cred,
+        tick,
+    );
 
     render_session_chart(frame, right_rows[4], &bars, tick);
 
@@ -252,12 +291,7 @@ fn render_footer(frame: &mut Frame, area: Rect, reloading: bool) {
     }
 }
 
-fn render_kpi_bar(
-    frame: &mut Frame,
-    area: Rect,
-    bars: &[DayBar],
-    hits: &[&RateLimitHit],
-) {
+fn render_kpi_bar(frame: &mut Frame, area: Rect, bars: &[DayBar], hits: &[&RateLimitHit]) {
     let t = theme();
 
     // KPI 1: Avg tokens/session (from history bars, excluding current)
@@ -329,9 +363,7 @@ fn render_kpi_bar(
         (&hits_str, " Rate-limit hits ", hits_color),
     ];
 
-    let col_constraints: Vec<Constraint> = (0..3)
-        .map(|_| Constraint::Ratio(1, 3))
-        .collect();
+    let col_constraints: Vec<Constraint> = (0..3).map(|_| Constraint::Ratio(1, 3)).collect();
     let col_areas = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(col_constraints)
@@ -398,7 +430,15 @@ fn render_credential_cards(
 
     for (i, cred) in credentials.iter().enumerate() {
         let is_selected = selected == Some(i);
-        render_card(frame, cols[i], cred, source_names, source_roots, credential_roots, is_selected);
+        render_card(
+            frame,
+            cols[i],
+            cred,
+            source_names,
+            source_roots,
+            credential_roots,
+            is_selected,
+        );
     }
 }
 
@@ -423,7 +463,11 @@ fn render_card(
     // Extra usage in title bar (right-aligned)
     let title_right = extra_usage_title(cred.usage.as_ref());
 
-    let border_color = if is_selected { t.border_highlight } else { t.border };
+    let border_color = if is_selected {
+        t.border_highlight
+    } else {
+        t.border
+    };
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
@@ -434,9 +478,7 @@ fn render_card(
         ));
 
     if !title_right.is_empty() {
-        block = block.title_top(
-            Line::from(title_right).alignment(Alignment::Right),
-        );
+        block = block.title_top(Line::from(title_right).alignment(Alignment::Right));
     }
 
     let inner = block.inner(area);
@@ -448,7 +490,10 @@ fn render_card(
             let line = Line::from(vec![
                 Span::styled("loading...", Style::default().fg(t.text_dim)),
                 Span::styled(
-                    format!(" ({}req, {}err)", cred.stats.call_count, cred.stats.rate_limit_count),
+                    format!(
+                        " ({}req, {}err)",
+                        cred.stats.call_count, cred.stats.rate_limit_count
+                    ),
                     Style::default().fg(t.text_dim),
                 ),
             ]);
@@ -460,7 +505,9 @@ fn render_card(
 /// Build extra usage spans for the block title (right side).
 fn extra_usage_title(usage: Option<&UsageReport>) -> Vec<Span<'static>> {
     let Some(u) = usage else { return vec![] };
-    let Some(extra) = &u.extra_usage else { return vec![] };
+    let Some(extra) = &u.extra_usage else {
+        return vec![];
+    };
     if !extra.is_enabled || extra.used_credits.is_none() {
         return vec![];
     }
@@ -469,22 +516,15 @@ fn extra_usage_title(usage: Option<&UsageReport>) -> Vec<Span<'static>> {
     let limit = extra.monthly_limit.unwrap_or(0.0) / 100.0;
     let util = extra.utilization.unwrap_or(0.0);
 
-    vec![
-        Span::styled(
-            format!("${:.2}/${:.2} ({:.0}%) ", used, limit, util),
-            Style::default()
-                .fg(util_color(util))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]
+    vec![Span::styled(
+        format!("${:.2}/${:.2} ({:.0}%) ", used, limit, util),
+        Style::default()
+            .fg(util_color(util))
+            .add_modifier(Modifier::BOLD),
+    )]
 }
 
-fn render_compact_usage(
-    frame: &mut Frame,
-    area: Rect,
-    usage: &UsageReport,
-    stats: &UsageStats,
-) {
+fn render_compact_usage(frame: &mut Frame, area: Rect, usage: &UsageReport, stats: &UsageStats) {
     let t = theme();
 
     let windows: &[(&str, Option<&UsageWindow>)] = &[
@@ -496,7 +536,15 @@ fn render_compact_usage(
     ];
     let items: Vec<(&str, f64, String)> = windows
         .iter()
-        .filter_map(|(label, w)| w.map(|w| (*label, w.utilization, w.resets_at.as_deref().map(format_reset).unwrap_or_default())))
+        .filter_map(|(label, w)| {
+            w.map(|w| {
+                (
+                    *label,
+                    w.utilization,
+                    w.resets_at.as_deref().map(format_reset).unwrap_or_default(),
+                )
+            })
+        })
         .collect();
 
     let mut constraints: Vec<Constraint> = Vec::new();
@@ -554,7 +602,11 @@ fn render_rate_limits(
                 Some(min) if min >= 1.0 => {
                     let h = min as u64 / 60;
                     let m = min as u64 % 60;
-                    if h > 0 { format!("{}h{:02}", h, m) } else { format!("{}m", m) }
+                    if h > 0 {
+                        format!("{}h{:02}", h, m)
+                    } else {
+                        format!("{}m", m)
+                    }
                 }
                 Some(_) => "<1m".to_string(),
                 None => "—".to_string(),
@@ -581,7 +633,8 @@ fn render_rate_limits(
     .header(
         Row::new(vec![
             Cell::from("Date").style(Style::default().fg(t.text_dim).add_modifier(Modifier::BOLD)),
-            Cell::from("Source").style(Style::default().fg(t.text_dim).add_modifier(Modifier::BOLD)),
+            Cell::from("Source")
+                .style(Style::default().fg(t.text_dim).add_modifier(Modifier::BOLD)),
             Cell::from("Dur").style(Style::default().fg(t.text_dim).add_modifier(Modifier::BOLD)),
         ])
         .bottom_margin(1),
@@ -630,6 +683,8 @@ enum BarKind {
 struct DayBar {
     date: NaiveDate,
     tokens: u64,
+    input_tokens: u64,
+    output_tokens: u64,
     kind: BarKind,
 }
 
@@ -647,6 +702,8 @@ fn compute_session_bars(
     let Some(root) = source_root else {
         return Vec::new();
     };
+
+    let daily_io = index.daily_input_output_for_root(root);
 
     let mut rate_limited_days: std::collections::HashSet<NaiveDate> =
         std::collections::HashSet::new();
@@ -673,6 +730,20 @@ fn compute_session_bars(
             .push(entry.estimated_tokens);
     }
 
+    // Helper: split estimated total into (input, output) using the actual
+    // ratio from the index for that day. Falls back to 50/50 if no data.
+    let split_tokens = |date: NaiveDate, total: u64| -> (u64, u64) {
+        if let Some(&(inp, out)) = daily_io.get(&date) {
+            let actual_total = inp + out;
+            if actual_total > 0 {
+                let input_part = (total as f64 * inp as f64 / actual_total as f64).round() as u64;
+                return (input_part, total.saturating_sub(input_part));
+            }
+        }
+        let half = total / 2;
+        (half, total - half)
+    };
+
     let mut bars: Vec<DayBar> = Vec::new();
 
     let all_dates: std::collections::BTreeSet<NaiveDate> = day_entries
@@ -688,9 +759,12 @@ fn compute_session_bars(
             if let Some(list) = tokens_list {
                 if !list.is_empty() {
                     let avg = list.iter().sum::<u64>() / list.len() as u64;
+                    let (inp, out) = split_tokens(date, avg);
                     bars.push(DayBar {
                         date,
                         tokens: avg,
+                        input_tokens: inp,
+                        output_tokens: out,
                         kind: BarKind::RateLimited,
                     });
                     continue;
@@ -699,18 +773,24 @@ fn compute_session_bars(
             // Fallback: if rate-limit hit but no token data from hits, use history
             if let Some(list) = day_entries.get(&date) {
                 let avg = list.iter().sum::<u64>() / list.len() as u64;
+                let (inp, out) = split_tokens(date, avg);
                 bars.push(DayBar {
                     date,
                     tokens: avg,
+                    input_tokens: inp,
+                    output_tokens: out,
                     kind: BarKind::RateLimited,
                 });
             }
         } else if let Some(list) = day_entries.get(&date) {
             // Violet bar: average of all history entries for that day
             let avg = list.iter().sum::<u64>() / list.len() as u64;
+            let (inp, out) = split_tokens(date, avg);
             bars.push(DayBar {
                 date,
                 tokens: avg,
+                input_tokens: inp,
+                output_tokens: out,
                 kind: BarKind::History,
             });
         }
@@ -720,14 +800,15 @@ fn compute_session_bars(
     if !bars.is_empty() {
         let first = bars[0].date;
         let last = bars.last().unwrap().date;
-        let existing: std::collections::HashSet<NaiveDate> =
-            bars.iter().map(|b| b.date).collect();
+        let existing: std::collections::HashSet<NaiveDate> = bars.iter().map(|b| b.date).collect();
         let mut d = first;
         while d <= last {
             if !existing.contains(&d) {
                 bars.push(DayBar {
                     date: d,
                     tokens: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
                     kind: BarKind::History,
                 });
             }
@@ -746,29 +827,29 @@ fn compute_session_bars(
                     let session_start_utc = resets_utc - chrono::Duration::hours(5);
                     let now_utc = chrono::Utc::now();
 
-                    // Skip the live bar when the session is too young
-                    // (< 30 min) or utilization too low: the ratio
-                    // tokens / utilization is unstable early on.
                     let elapsed_min =
                         (now_utc - session_start_utc).num_seconds().max(0) as f64 / 60.0;
                     let utilization = five_h.utilization;
 
-                    if elapsed_min >= 30.0 && utilization >= 2.0 {
+                    if elapsed_min >= 30.0 || utilization >= 2.0 {
                         let start_local = session_start_utc
                             .with_timezone(&chrono::Local)
                             .naive_local();
-                        let end_local = now_utc
-                            .with_timezone(&chrono::Local)
-                            .naive_local();
-                        let tokens = index.tokens_in_window(root, start_local, end_local);
+                        let end_local = now_utc.with_timezone(&chrono::Local).naive_local();
+                        let (inp, out) = index.tokens_in_window_split(root, start_local, end_local);
+                        let tokens = inp + out;
                         if tokens > 0 {
-                            let estimated_tokens =
-                                (tokens as f64 / (utilization / 100.0)).round() as u64;
+                            let scale = 1.0 / (utilization / 100.0);
+                            let estimated_tokens = (tokens as f64 * scale).round() as u64;
+                            let estimated_in = (inp as f64 * scale).round() as u64;
+                            let estimated_out = estimated_tokens.saturating_sub(estimated_in);
                             if estimated_tokens > 0 {
                                 let today = chrono::Local::now().date_naive();
                                 bars.push(DayBar {
                                     date: today,
                                     tokens: estimated_tokens,
+                                    input_tokens: estimated_in,
+                                    output_tokens: estimated_out,
                                     kind: BarKind::Current,
                                 });
                             }
@@ -849,19 +930,18 @@ fn render_session_forecast(
 
     // Parse session timing
     let now_local = chrono::Local::now();
-    let (session_start_local, session_end_local) =
-        if let Some(resets_at_str) = &five_h.resets_at
-            && let Ok(resets_at) = chrono::DateTime::parse_from_rfc3339(resets_at_str)
-        {
-            let end = resets_at.with_timezone(&chrono::Local);
-            let start = end - chrono::Duration::hours(5);
-            (start.naive_local(), end.naive_local())
-        } else {
-            // Fallback: assume 5h window ending 5h from now
-            let end = now_local.naive_local() + chrono::Duration::hours(5);
-            let start = now_local.naive_local();
-            (start, end)
-        };
+    let (session_start_local, session_end_local) = if let Some(resets_at_str) = &five_h.resets_at
+        && let Ok(resets_at) = chrono::DateTime::parse_from_rfc3339(resets_at_str)
+    {
+        let end = resets_at.with_timezone(&chrono::Local);
+        let start = end - chrono::Duration::hours(5);
+        (start.naive_local(), end.naive_local())
+    } else {
+        // Fallback: assume 5h window ending 5h from now
+        let end = now_local.naive_local() + chrono::Duration::hours(5);
+        let start = now_local.naive_local();
+        (start, end)
+    };
 
     let total_window_min = 300.0f64; // 5h in minutes
     let elapsed_min = (now_local.naive_local() - session_start_local)
@@ -880,7 +960,11 @@ fn render_session_forecast(
     let sample_start = now_minute.saturating_sub(sample_window);
 
     let mut recent_tokens: u64 = 0;
-    for (&(date, minute), &val) in minute_tokens.input.iter().chain(minute_tokens.output.iter()) {
+    for (&(date, minute), &val) in minute_tokens
+        .input
+        .iter()
+        .chain(minute_tokens.output.iter())
+    {
         if date == today && minute >= sample_start && minute <= now_minute {
             recent_tokens += val;
         } else if date == today.pred_opt().unwrap_or(today)
@@ -979,7 +1063,10 @@ fn render_session_forecast(
     // Session start and end times on left/right, bar in between
     let start_str = format!("{}", session_start_local.format("%H:%M"));
     let end_str = format!("{}", session_end_local.format("%H:%M"));
-    let bar_width = inner.width.saturating_sub(start_str.len() as u16 + end_str.len() as u16 + 2) as usize;
+    let bar_width = inner
+        .width
+        .saturating_sub(start_str.len() as u16 + end_str.len() as u16 + 2)
+        as usize;
 
     let now_pos = (elapsed_min / total_window_min).clamp(0.0, 1.0);
     let filled = (now_pos * bar_width as f64) as usize;
@@ -1037,7 +1124,9 @@ fn render_session_forecast(
     }
     status_spans.push(Span::styled(
         status_label,
-        Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(status_color)
+            .add_modifier(Modifier::BOLD),
     ));
     status_spans.push(Span::styled(
         format!(" — {}", time_remaining_label),
@@ -1077,14 +1166,12 @@ fn render_usage_timeline(
     let t = theme();
     let dot_color = t.tokens_in;
 
-    let title = Line::from(vec![
-        Span::styled(
-            " Session tokens ",
-            Style::default()
-                .fg(t.heatmap_title)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
+    let title = Line::from(vec![Span::styled(
+        " Session tokens ",
+        Style::default()
+            .fg(t.heatmap_title)
+            .add_modifier(Modifier::BOLD),
+    )]);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1107,8 +1194,8 @@ fn render_usage_timeline(
         && let Some(resets_at_str) = &five_h.resets_at
         && let Ok(resets_at) = chrono::DateTime::parse_from_rfc3339(resets_at_str)
     {
-        let session_start = (resets_at.with_timezone(&chrono::Local) - chrono::Duration::hours(5))
-            .naive_local();
+        let session_start =
+            (resets_at.with_timezone(&chrono::Local) - chrono::Duration::hours(5)).naive_local();
         let date = session_start.date();
         let sm = session_start.hour() as u16 * 60 + session_start.minute() as u16;
         let nm = if date == now_local.date_naive() {
@@ -1142,7 +1229,11 @@ fn render_usage_timeline(
     let n_buckets = ((total_minutes + bucket_min - 1) / bucket_min).max(1) as usize;
 
     let mut buckets = vec![0u64; n_buckets];
-    for (&(date, minute), &val) in minute_tokens.input.iter().chain(minute_tokens.output.iter()) {
+    for (&(date, minute), &val) in minute_tokens
+        .input
+        .iter()
+        .chain(minute_tokens.output.iter())
+    {
         let offset = if spans_midnight {
             if date == session_date && minute >= start_minute {
                 Some((minute - start_minute) as u32)
@@ -1205,7 +1296,11 @@ fn render_usage_timeline(
                 let hi = hi.min(n_buckets);
                 if lo >= hi {
                     let idx = center.round() as usize;
-                    if idx < n_buckets { buckets[idx] as f64 } else { 0.0 }
+                    if idx < n_buckets {
+                        buckets[idx] as f64
+                    } else {
+                        0.0
+                    }
                 } else {
                     let sum: u64 = buckets[lo..hi].iter().sum();
                     sum as f64 / (hi - lo) as f64
@@ -1257,7 +1352,11 @@ fn render_usage_timeline(
         // Interpolate vertically between this point and the next
         if dx + 1 < n_points {
             let dy_next = y_positions[dx + 1];
-            let (lo, hi) = if dy < dy_next { (dy, dy_next) } else { (dy_next, dy) };
+            let (lo, hi) = if dy < dy_next {
+                (dy, dy_next)
+            } else {
+                (dy_next, dy)
+            };
             for y in lo..=hi {
                 set_dot(&mut braille_map, dx, y);
             }
@@ -1298,18 +1397,32 @@ fn render_usage_timeline(
 
 fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], _tick: usize) {
     let t = theme();
+    // Base colors per bar kind
     let red = Color::Rgb(220, 60, 60);
     let blue = Color::Rgb(80, 170, 240);
     let violet = Color::Rgb(160, 100, 220);
+    // Lighter variants for input portion (high contrast)
+    let red_light = Color::Rgb(255, 150, 130);
+    let blue_light = Color::Rgb(170, 220, 255);
+    let violet_light = Color::Rgb(220, 180, 255);
 
     let title = Line::from(vec![
-        Span::styled(" Max usage graph ", Style::default().fg(t.heatmap_title).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " Max usage graph ",
+            Style::default()
+                .fg(t.heatmap_title)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("██", Style::default().fg(violet)),
         Span::styled(" history ", Style::default().fg(t.text_dim)),
         Span::styled("██", Style::default().fg(red)),
         Span::styled(" hit ", Style::default().fg(t.text_dim)),
         Span::styled("██", Style::default().fg(blue)),
         Span::styled(" live ", Style::default().fg(t.text_dim)),
+        Span::styled("│ ", Style::default().fg(t.border)),
+        Span::styled("█", Style::default().fg(violet_light)),
+        Span::styled("█", Style::default().fg(violet)),
+        Span::styled(" in/out ", Style::default().fg(t.text_dim)),
     ]);
 
     let block = Block::default()
@@ -1363,20 +1476,41 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], _tick: u
         }
 
         let ratio = bar.tokens as f64 / max_tokens as f64;
-        let bar_h = (ratio * chart_height as f64).round().max(if bar.tokens > 0 { 1.0 } else { 0.0 }) as usize;
-        let color = match bar.kind {
-            BarKind::Current => blue,
-            BarKind::RateLimited => red,
-            BarKind::History => violet,
+        let bar_h = (ratio * chart_height as f64)
+            .round()
+            .max(if bar.tokens > 0 { 1.0 } else { 0.0 }) as usize;
+
+        // Colors: darker shade = output (bottom), lighter shade = input (top)
+        let (color_output, color_input) = match bar.kind {
+            BarKind::Current => (blue, blue_light),
+            BarKind::RateLimited => (red, red_light),
+            BarKind::History => (violet, violet_light),
         };
 
-        // Draw bar from bottom to top
+        // Stacked bar: output on bottom, input on top
+        // Guarantee at least 1 row for each non-zero portion
+        let out_h = if bar.tokens > 0 && bar_h >= 2 && bar.output_tokens > 0 && bar.input_tokens > 0
+        {
+            let out_ratio = bar.output_tokens as f64 / bar.tokens as f64;
+            let raw = (out_ratio * bar_h as f64).round() as usize;
+            raw.clamp(1, bar_h - 1)
+        } else if bar.tokens > 0 && bar.input_tokens == 0 {
+            bar_h
+        } else {
+            0
+        };
+
         for dy in 0..bar_h.min(chart_height) {
             let y = inner.y + chart_height as u16 - 1 - dy as u16;
+            let c = if dy < out_h {
+                color_output
+            } else {
+                color_input
+            };
             for dx in 0..bar_w {
                 let cell = &mut buf[(x + dx, y)];
                 cell.set_char(' ');
-                cell.set_bg(color);
+                cell.set_bg(c);
             }
         }
 
@@ -1393,9 +1527,8 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], _tick: u
         }
 
         // Month label on first bar and when month changes
-        let show_month = i == 0
-            || (i > 0
-                && visible[i].date.month() != visible[i - 1].date.month());
+        let show_month =
+            i == 0 || (i > 0 && visible[i].date.month() != visible[i - 1].date.month());
         if show_month {
             let month_y = inner.y + chart_height as u16 + 1;
             if month_y < inner.y + inner.height {
@@ -1468,7 +1601,8 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], _tick: u
         const DOT_BITS: [u8; 8] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
 
         // Collect which braille dots to set per cell
-        let mut braille_map: std::collections::HashMap<(u16, u16), u8> = std::collections::HashMap::new();
+        let mut braille_map: std::collections::HashMap<(u16, u16), u8> =
+            std::collections::HashMap::new();
 
         for dx in 0..dot_cols {
             let data_x = if dot_cols > 1 {
@@ -1511,4 +1645,3 @@ fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], _tick: u
         }
     }
 }
-

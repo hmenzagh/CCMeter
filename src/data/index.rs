@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{NaiveDate, Timelike};
 
@@ -408,15 +408,27 @@ impl EventIndex {
         start_local: chrono::NaiveDateTime,
         end_local: chrono::NaiveDateTime,
     ) -> u64 {
+        let (inp, out) = self.tokens_in_window_split(source_root, start_local, end_local);
+        inp + out
+    }
+
+    /// Return (input, output) tokens within a local time window for a given source root.
+    pub fn tokens_in_window_split(
+        &self,
+        source_root: &str,
+        start_local: chrono::NaiveDateTime,
+        end_local: chrono::NaiveDateTime,
+    ) -> (u64, u64) {
         let Some(&root_idx) = self.root_intern.get(source_root) else {
-            return 0;
+            return (0, 0);
         };
         let start_date = start_local.date();
         let end_date = end_local.date();
         let start_min = start_local.hour() as u16 * 60 + start_local.minute() as u16;
         let end_min = end_local.hour() as u16 * 60 + end_local.minute() as u16;
 
-        let mut total = 0u64;
+        let mut total_in = 0u64;
+        let mut total_out = 0u64;
         for e in &self.entries {
             if e.root_idx != root_idx {
                 continue;
@@ -432,14 +444,33 @@ impl EventIndex {
                 if e.minute < start_min {
                     continue;
                 }
-            } else if e.date == end_date {
-                if e.minute > end_min {
-                    continue;
-                }
+            } else if e.date == end_date && e.minute > end_min {
+                continue;
             }
-            total += e.input_tokens + e.output_tokens;
+            total_in += e.input_tokens;
+            total_out += e.output_tokens;
         }
-        total
+        (total_in, total_out)
+    }
+
+    /// Return per-day (input, output) token totals for a source root.
+    pub fn daily_input_output_for_root(
+        &self,
+        source_root: &str,
+    ) -> BTreeMap<NaiveDate, (u64, u64)> {
+        let mut map: BTreeMap<NaiveDate, (u64, u64)> = BTreeMap::new();
+        let Some(&root_idx) = self.root_intern.get(source_root) else {
+            return map;
+        };
+        for e in &self.entries {
+            if e.root_idx != root_idx {
+                continue;
+            }
+            let entry = map.entry(e.date).or_default();
+            entry.0 += e.input_tokens;
+            entry.1 += e.output_tokens;
+        }
+        map
     }
 
     // ------------------------------------------------------------------
