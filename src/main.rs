@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod data;
 mod ui;
+mod update_check;
 
 use std::io;
 use std::sync::mpsc;

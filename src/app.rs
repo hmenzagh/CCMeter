@@ -20,6 +20,7 @@ use crate::ui::cards;
 use crate::ui::heatmap;
 use crate::ui::settings_view::{KeyResult, SettingsState};
 use crate::ui::time_filter::{TimeFilter, date_in_filter, filter_daily};
+use crate::update_check::{self, UpdateInfo};
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -91,6 +92,9 @@ pub(crate) struct RenderCache {
     pub(crate) minute_model: HashMap<(String, String), HashMap<(NaiveDate, u16), f64>>,
     pub(crate) cards: Vec<cards::ProjectCard>,
     pub(crate) range: (NaiveDate, NaiveDate),
+    /// Maps display position → index in `config.groups`.
+    /// Navigation with ←/→ follows this order so it matches the card rendering order.
+    pub(crate) display_order: Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +123,10 @@ pub(crate) struct App {
     pub(crate) last_reload: std::time::Instant,
 
     usage_poller: UsagePoller,
+    pub(crate) reload_interval: Duration,
+
+    pub(crate) update_info: Option<UpdateInfo>,
+    update_rx: mpsc::Receiver<UpdateInfo>,
 }
 
 impl App {
@@ -170,6 +178,7 @@ impl App {
 
         let render = build_render_cache(
             &daily_tokens,
+            &minute_tokens,
             &index,
             &groups,
             &merged_cache,
@@ -181,6 +190,7 @@ impl App {
 
         let (reload_tx, reload_rx) = mpsc::channel::<ReloadResult>();
         let usage_poller = UsagePoller::new(&oauth_credentials);
+        let update_rx = update_check::spawn_check();
 
         let mut app = App {
             data: AppData {
@@ -217,6 +227,9 @@ impl App {
             start_time: std::time::Instant::now(),
             last_reload: std::time::Instant::now(),
             usage_poller,
+            reload_interval: Duration::from_secs(5 * 60),
+            update_info: None,
+            update_rx,
         };
         app.record_rate_history();
         app
@@ -227,7 +240,8 @@ impl App {
     // ------------------------------------------------------------------
 
     fn project_cwds(&self) -> Option<Vec<String>> {
-        project_cwds_static(&self.config.groups, self.project_index)
+        let group_index = self.project_index.map(|i| self.render.display_order[i]);
+        project_cwds_static(&self.config.groups, group_index)
     }
 
     fn recompute_tokens(&mut self) {
@@ -250,8 +264,10 @@ impl App {
     fn recompute_render_cache(&mut self) {
         let cwds_filter = self.project_cwds();
         let source_root = self.config.source_roots[self.source_index].as_deref();
+        let prev_display_order = std::mem::take(&mut self.render.display_order);
         self.render = build_render_cache(
             &self.data.daily_tokens,
+            &self.data.minute_tokens,
             &self.data.index,
             &self.config.groups,
             &self.data.merged_cache,
@@ -260,6 +276,12 @@ impl App {
             cwds_filter.as_deref(),
             self.time_filter,
         );
+        // When viewing a single project, build_render_cache produces a
+        // display_order with only one entry. Preserve the full ordering
+        // so that ←/→ navigation keeps working.
+        if self.project_index.is_some() {
+            self.render.display_order = prev_display_order;
+        }
         self.render_dirty = false;
     }
 
@@ -324,6 +346,11 @@ impl App {
     pub(crate) fn pre_render(&mut self) {
         if let View::Settings(state) = &mut self.view {
             state.tick = (self.start_time.elapsed().as_millis() / 80) as usize;
+        }
+        if self.update_info.is_none()
+            && let Ok(info) = self.update_rx.try_recv()
+        {
+            self.update_info = Some(info);
         }
         if self.render_dirty {
             self.recompute_render_cache();
@@ -449,19 +476,19 @@ impl App {
                     self.card_scroll = self.card_scroll.saturating_sub(1);
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
+                    let len = self.render.display_order.len();
                     self.project_index = match self.project_index {
-                        None if !self.config.groups.is_empty() => Some(0),
-                        Some(i) if i + 1 < self.config.groups.len() => Some(i + 1),
+                        None if len > 0 => Some(0),
+                        Some(i) if i + 1 < len => Some(i + 1),
                         _ => None,
                     };
                     self.card_scroll = 0;
                     self.recompute_tokens();
                 }
                 KeyCode::Left | KeyCode::Char('h') => {
+                    let len = self.render.display_order.len();
                     self.project_index = match self.project_index {
-                        None if !self.config.groups.is_empty() => {
-                            Some(self.config.groups.len() - 1)
-                        }
+                        None if len > 0 => Some(len - 1),
                         Some(0) => None,
                         Some(i) => Some(i - 1),
                         _ => None,
@@ -487,7 +514,7 @@ impl App {
                             &mut self.config.overrides,
                         );
                         if let Some(idx) = self.project_index
-                            && idx >= self.config.groups.len()
+                            && idx >= self.render.display_order.len()
                         {
                             self.project_index = None;
                         }
@@ -530,6 +557,7 @@ fn project_cwds_static(
 #[allow(clippy::too_many_arguments)]
 fn build_render_cache(
     daily_tokens: &DailyTokens,
+    minute_tokens: &MinuteTokens,
     index: &EventIndex,
     groups: &[discovery::ProjectGroup],
     merged_cache: &cache::Cache,
@@ -538,8 +566,17 @@ fn build_render_cache(
     project_cwds: Option<&[String]>,
     time_filter: TimeFilter,
 ) -> RenderCache {
-    let filtered = filter_daily(daily_tokens, time_filter);
     let today_snap = Local::now().date_naive();
+    let subday = time_filter.subday_start();
+
+    // For sub-day filters (1H, 12H), build DailyTokens from minute-level data
+    // so that KPI values reflect the actual time window.
+    let filtered = if let Some((sd, sm)) = subday {
+        minute_tokens.to_daily_filtered(sd, sm, today_snap)
+    } else {
+        filter_daily(daily_tokens, time_filter)
+    };
+
     let kpi = CachedKpi::compute(&filtered);
     let cwd_to_root = cards::build_cwd_to_root(groups);
     let date_filter = |d: NaiveDate| date_in_filter(d, time_filter, today_snap);
@@ -549,10 +586,21 @@ fn build_render_cache(
         &date_filter,
         project_cwds,
         time_filter.is_intraday(),
+        subday,
     );
+
+    // For sub-day filters, build a cache from the index filtered by minute
+    // so that card costs reflect the actual time window.
+    let effective_cache;
+    let cache_ref = if let Some((sd, sm)) = subday {
+        effective_cache = index.build_subday_cache(sd, sm, today_snap);
+        &effective_cache
+    } else {
+        merged_cache
+    };
     let cards = cards::build_cards(
         groups,
-        merged_cache,
+        cache_ref,
         overrides,
         source_root,
         date_filter,
@@ -560,6 +608,18 @@ fn build_render_cache(
         project_cwds,
         &stats.daily_costs,
     );
+
+    // Build a mapping from display position (card order) → group index.
+    let root_to_group: std::collections::HashMap<String, usize> = groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.root_key(), i))
+        .collect();
+    let display_order: Vec<usize> = cards
+        .iter()
+        .filter_map(|c| root_to_group.get(&c.root_key).copied())
+        .collect();
+
     let range = compute_range(&filtered, time_filter, today_snap);
 
     RenderCache {
@@ -568,6 +628,7 @@ fn build_render_cache(
         minute_model: stats.minute_costs,
         cards,
         range,
+        display_order,
     }
 }
 

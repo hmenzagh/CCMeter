@@ -72,13 +72,18 @@ impl TextInput {
 
     fn insert_char(&mut self, c: char) {
         self.input.insert(self.cursor, c);
-        self.cursor += 1;
+        self.cursor += c.len_utf8();
     }
 
     fn backspace(&mut self) {
         if self.cursor > 0 {
-            self.input.remove(self.cursor - 1);
-            self.cursor -= 1;
+            let prev = self.input[..self.cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.input.remove(prev);
+            self.cursor = prev;
         }
     }
 
@@ -90,13 +95,21 @@ impl TextInput {
 
     fn move_left(&mut self) {
         if self.cursor > 0 {
-            self.cursor -= 1;
+            self.cursor = self.input[..self.cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
         }
     }
 
     fn move_right(&mut self) {
         if self.cursor < self.input.len() {
-            self.cursor += 1;
+            self.cursor = self.input[self.cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.cursor + i)
+                .unwrap_or(self.input.len());
         }
     }
 
@@ -106,6 +119,11 @@ impl TextInput {
 
     fn end(&mut self) {
         self.cursor = self.input.len();
+    }
+
+    /// Display column position (character count up to the cursor byte offset).
+    fn display_col(&self) -> usize {
+        self.input[..self.cursor].chars().count()
     }
 }
 
@@ -519,7 +537,7 @@ impl SettingsState {
         );
         frame.render_widget(bar, area);
 
-        let cursor_x = area.x + 3 + search.text.cursor as u16;
+        let cursor_x = area.x + 3 + search.text.display_col() as u16;
         let cursor_y = area.y + 1;
         frame.set_cursor_position((cursor_x, cursor_y));
     }
@@ -606,29 +624,26 @@ impl SettingsState {
 
         let input_area = Rect::new(inner.x, inner.y + 2, inner.width, 1);
         let input_width = input_area.width as usize;
+        let char_count = modal.text.input.chars().count();
+        let cursor_chars = modal.text.display_col();
 
-        let display = if modal.text.input.len() <= input_width {
+        let display = if char_count <= input_width {
             format!("{:<width$}", modal.text.input, width = input_width)
         } else {
-            let start = modal
+            let start_chars = cursor_chars.saturating_sub(input_width.saturating_sub(1));
+            let visible: String = modal
                 .text
-                .cursor
-                .saturating_sub(input_width.saturating_sub(1));
-            let end = modal.text.input.len().min(start + input_width);
-            format!(
-                "{:<width$}",
-                &modal.text.input[start..end],
-                width = input_width
-            )
+                .input
+                .chars()
+                .skip(start_chars)
+                .take(input_width)
+                .collect();
+            format!("{:<width$}", visible, width = input_width)
         };
-        let cursor_x = if modal.text.input.len() <= input_width {
-            modal.text.cursor
+        let cursor_x = if char_count <= input_width {
+            cursor_chars
         } else {
-            modal.text.cursor
-                - modal
-                    .text
-                    .cursor
-                    .saturating_sub(input_width.saturating_sub(1))
+            cursor_chars - cursor_chars.saturating_sub(input_width.saturating_sub(1))
         };
 
         let input = Paragraph::new(Span::styled(
@@ -1096,10 +1111,21 @@ fn render_hint_bar(frame: &mut Frame, area: Rect, hints: Vec<Span<'_>>) {
 
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else if max > 1 {
-        format!("{}…", &s[..max - 1])
-    } else {
-        s[..max].to_string()
+        return s.to_string();
     }
+    if max <= 1 {
+        return if max == 1 {
+            "…".to_string()
+        } else {
+            String::new()
+        };
+    }
+    // Find the last valid char boundary at or before (max - 1) bytes
+    // to leave room for the '…' suffix.
+    let target = max - 1;
+    let mut boundary = target.min(s.len());
+    while boundary > 0 && !s.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    format!("{}…", &s[..boundary])
 }

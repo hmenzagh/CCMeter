@@ -53,9 +53,13 @@ pub struct CompactEntry {
     pub minute: u16,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
     pub cost: f64,
     pub lines_accepted: u64,
     pub lines_suggested: u64,
+    pub lines_added: u64,
+    pub lines_deleted: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +82,7 @@ pub struct ModelStats {
 /// (root, cwd, model, date, minute_of_day) to drastically reduce
 /// memory compared to keeping every raw event.
 pub struct EventIndex {
+    roots: Vec<String>,
     cwds: Vec<String>,
     root_intern: HashMap<String, u16>,
     cwd_intern: HashMap<String, u16>,
@@ -95,7 +100,20 @@ impl EventIndex {
 
         // Aggregate into a HashMap first, then flatten.
         type Key = (u16, u16, ModelId, NaiveDate, u16);
-        let mut agg: HashMap<Key, (u64, u64, f64, u64, u64)> = HashMap::new();
+        #[derive(Default)]
+        struct Acc {
+            input: u64,
+            output: u64,
+            cache_read: u64,
+            cache_creation: u64,
+            cost: f64,
+            lines_accepted: u64,
+            lines_suggested: u64,
+            lines_added: u64,
+            lines_deleted: u64,
+        }
+
+        let mut agg: HashMap<Key, Acc> = HashMap::new();
 
         for ev in events {
             let (root, cwd) = match session_info.get(&ev.session_file) {
@@ -126,34 +144,41 @@ impl EventIndex {
 
             let key = (root_idx, cwd_idx, model, date, minute);
             let acc = agg.entry(key).or_default();
-            acc.0 += ev.input_tokens;
-            acc.1 += ev.output_tokens;
-            acc.2 += ev.cost_usd;
-            acc.3 += ev.lines_accepted;
-            acc.4 += ev.lines_suggested;
+            acc.input += ev.input_tokens;
+            acc.output += ev.output_tokens;
+            acc.cache_read += ev.cache_read_input_tokens;
+            acc.cache_creation += ev.cache_creation_input_tokens;
+            acc.cost += ev.cost_usd;
+            acc.lines_accepted += ev.lines_accepted;
+            acc.lines_suggested += ev.lines_suggested;
+            acc.lines_added += ev.lines_added;
+            acc.lines_deleted += ev.lines_deleted;
         }
 
         let entries: Vec<CompactEntry> = agg
             .into_iter()
             .map(
-                |((root_idx, cwd_idx, model, date, minute), (inp, out, cost, la, ls))| {
-                    CompactEntry {
-                        root_idx,
-                        cwd_idx,
-                        model,
-                        date,
-                        minute,
-                        input_tokens: inp,
-                        output_tokens: out,
-                        cost,
-                        lines_accepted: la,
-                        lines_suggested: ls,
-                    }
+                |((root_idx, cwd_idx, model, date, minute), a)| CompactEntry {
+                    root_idx,
+                    cwd_idx,
+                    model,
+                    date,
+                    minute,
+                    input_tokens: a.input,
+                    output_tokens: a.output,
+                    cache_read: a.cache_read,
+                    cache_creation: a.cache_creation,
+                    cost: a.cost,
+                    lines_accepted: a.lines_accepted,
+                    lines_suggested: a.lines_suggested,
+                    lines_added: a.lines_added,
+                    lines_deleted: a.lines_deleted,
                 },
             )
             .collect();
 
         EventIndex {
+            roots,
             cwds,
             root_intern,
             cwd_intern,
@@ -184,12 +209,17 @@ impl EventIndex {
             *mt.output.entry(key).or_default() += e.output_tokens;
             *mt.lines_accepted.entry(key).or_default() += e.lines_accepted;
             *mt.lines_suggested.entry(key).or_default() += e.lines_suggested;
+            *mt.lines_added.entry(key).or_default() += e.lines_added;
+            *mt.lines_deleted.entry(key).or_default() += e.lines_deleted;
             *mt.cost.entry(key).or_default() += e.cost;
         }
         mt
     }
 
     /// Build all model-level aggregations in a single pass over entries.
+    ///
+    /// When `min_minute` is `Some(m)`, only entries on `today` whose minute >=
+    /// `m` are included (sub-day filtering for 1H / 12H).
     pub fn build_model_stats(
         &self,
         cwd_to_root: &HashMap<String, String>,
@@ -197,6 +227,7 @@ impl EventIndex {
         date_filter: &impl Fn(NaiveDate) -> bool,
         project_cwds: Option<&[String]>,
         include_minute: bool,
+        subday_start: Option<(NaiveDate, u16)>,
     ) -> ModelStats {
         let root_filter = source_root.and_then(|sr| self.root_intern.get(sr).copied());
         let cwd_filter = project_cwds.map(|cwds| self.cwd_set(cwds));
@@ -229,6 +260,13 @@ impl EventIndex {
                 continue;
             }
             if !date_filter(e.date) {
+                continue;
+            }
+            // Sub-day filtering: skip entries before the start (date, minute).
+            if let Some((sd, sm)) = subday_start
+                && e.date == sd
+                && e.minute < sm
+            {
                 continue;
             }
             let rk_idx = match cwd_to_rk.get(&e.cwd_idx) {
@@ -285,6 +323,78 @@ impl EventIndex {
             daily_costs,
             minute_costs,
         }
+    }
+
+    /// Build a [`Cache`] containing only entries within the window
+    /// `[start_date:start_minute .. end_date:*]`. Correctly handles windows
+    /// that cross midnight. `active_minutes` is estimated from the distinct
+    /// minutes present in the filtered window.
+    pub fn build_subday_cache(
+        &self,
+        start_date: NaiveDate,
+        start_minute: u16,
+        end_date: NaiveDate,
+    ) -> super::cache::Cache {
+        use super::cache::Cache;
+
+        let mut cache = Cache::new();
+        let roots = &self.roots;
+
+        // Collect distinct active minutes per (root, cwd, date) for active_minutes estimation.
+        let mut active_minutes_map: HashMap<(u16, u16, NaiveDate), Vec<u16>> = HashMap::new();
+
+        for e in &self.entries {
+            if e.date < start_date || e.date > end_date {
+                continue;
+            }
+            if e.date == start_date && e.minute < start_minute {
+                continue;
+            }
+            let root = &roots[e.root_idx as usize];
+            let cwd = &self.cwds[e.cwd_idx as usize];
+            let date_str = e.date.format("%Y-%m-%d").to_string();
+
+            let day_entry = cache
+                .entry_root(root.clone())
+                .entry(cwd.clone())
+                .or_default()
+                .entry(date_str)
+                .or_default();
+
+            day_entry.input += e.input_tokens;
+            day_entry.output += e.output_tokens;
+            day_entry.cache_read += e.cache_read;
+            day_entry.cache_creation += e.cache_creation;
+            day_entry.cost += e.cost;
+            day_entry.lines_suggested += e.lines_suggested;
+            day_entry.lines_accepted += e.lines_accepted;
+            day_entry.lines_added += e.lines_added;
+            day_entry.lines_deleted += e.lines_deleted;
+
+            active_minutes_map
+                .entry((e.root_idx, e.cwd_idx, e.date))
+                .or_default()
+                .push(e.minute);
+        }
+
+        // Estimate active_minutes using the same clustering approach as the main cache.
+        for ((root_idx, cwd_idx, date), mut minutes) in active_minutes_map {
+            minutes.sort();
+            minutes.dedup();
+            let active = super::cache::cluster_active_minutes(&minutes);
+            let root = &roots[root_idx as usize];
+            let cwd = &self.cwds[cwd_idx as usize];
+            let date_str = date.format("%Y-%m-%d").to_string();
+            if let Some(day_entry) = cache
+                .get_root_mut(root)
+                .and_then(|cwd_map| cwd_map.get_mut(cwd))
+                .and_then(|days| days.get_mut(&date_str))
+            {
+                day_entry.active_minutes = active;
+            }
+        }
+
+        cache
     }
 
     // ------------------------------------------------------------------

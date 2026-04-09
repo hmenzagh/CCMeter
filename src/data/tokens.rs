@@ -107,5 +107,91 @@ pub struct MinuteTokens {
     pub output: HashMap<(NaiveDate, u16), u64>,
     pub lines_accepted: HashMap<(NaiveDate, u16), u64>,
     pub lines_suggested: HashMap<(NaiveDate, u16), u64>,
+    pub lines_added: HashMap<(NaiveDate, u16), u64>,
+    pub lines_deleted: HashMap<(NaiveDate, u16), u64>,
     pub cost: HashMap<(NaiveDate, u16), f64>,
+}
+
+impl MinuteTokens {
+    /// Aggregate minute-level data into a `DailyTokens` keeping only entries
+    /// within the window `[start_date:start_minute .. end_date:*]`.
+    /// Correctly handles windows that cross midnight.
+    pub fn to_daily_filtered(
+        &self,
+        start_date: NaiveDate,
+        start_minute: u16,
+        end_date: NaiveDate,
+    ) -> DailyTokens {
+        fn fold_u64(
+            src: &HashMap<(NaiveDate, u16), u64>,
+            dst: &mut HashMap<NaiveDate, u64>,
+            start_date: NaiveDate,
+            start_minute: u16,
+            end_date: NaiveDate,
+        ) {
+            for (&(date, minute), &val) in src {
+                if date < start_date || date > end_date {
+                    continue;
+                }
+                if date == start_date && minute < start_minute {
+                    continue;
+                }
+                *dst.entry(date).or_default() += val;
+            }
+        }
+
+        let mut dt = DailyTokens::default();
+        fold_u64(
+            &self.input,
+            &mut dt.input,
+            start_date,
+            start_minute,
+            end_date,
+        );
+        fold_u64(
+            &self.output,
+            &mut dt.output,
+            start_date,
+            start_minute,
+            end_date,
+        );
+        fold_u64(
+            &self.lines_suggested,
+            &mut dt.lines_suggested,
+            start_date,
+            start_minute,
+            end_date,
+        );
+        fold_u64(
+            &self.lines_accepted,
+            &mut dt.lines_accepted,
+            start_date,
+            start_minute,
+            end_date,
+        );
+        fold_u64(
+            &self.lines_added,
+            &mut dt.lines_added,
+            start_date,
+            start_minute,
+            end_date,
+        );
+        fold_u64(
+            &self.lines_deleted,
+            &mut dt.lines_deleted,
+            start_date,
+            start_minute,
+            end_date,
+        );
+        for (&(date, minute), &val) in &self.cost {
+            if date < start_date || date > end_date {
+                continue;
+            }
+            if date == start_date && minute < start_minute {
+                continue;
+            }
+            *dt.cost.entry(date).or_default() += val;
+        }
+        dt
+    }
 }

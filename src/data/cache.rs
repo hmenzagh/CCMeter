@@ -66,6 +66,13 @@ impl Cache {
         self.0.entry(root).or_default()
     }
 
+    pub fn get_root_mut(
+        &mut self,
+        root: &str,
+    ) -> Option<&mut HashMap<String, HashMap<String, DayEntry>>> {
+        self.0.get_mut(root)
+    }
+
     /// Iterate all (root, cwd, date_str, entry) tuples, optionally filtered by root and/or cwds.
     pub fn iter_filtered<'a>(
         &'a self,
@@ -237,6 +244,14 @@ fn merge_intervals_duration(intervals: &mut [(u16, u16)]) -> u64 {
         .iter()
         .map(|(s, e)| (*e as u64 - *s as u64) + 1)
         .sum()
+}
+
+/// Compute active minutes from sorted, deduped minute-of-day values using
+/// gap-based clustering. Public so that `EventIndex::build_subday_cache` can
+/// reuse the same logic.
+pub fn cluster_active_minutes(minutes: &[u16]) -> u64 {
+    let mut intervals = cluster_to_intervals(minutes);
+    merge_intervals_duration(&mut intervals)
 }
 
 // ---------------------------------------------------------------------------
