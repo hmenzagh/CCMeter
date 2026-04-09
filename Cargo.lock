@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "ccmeter"
-version = "1.4.1"
+version = "2.0.0-beta.1"
 dependencies = [
  "chrono",
  "clap",
