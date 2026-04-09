@@ -144,6 +144,16 @@ fn random_interval() -> Duration {
 }
 
 impl UsagePoller {
+    /// Force all credentials to poll immediately on the next tick.
+    pub fn force_poll_all(&mut self) {
+        let now = Instant::now();
+        for entry in &mut self.entries {
+            if !entry.in_flight && entry.token.is_some() && !entry.expired {
+                entry.next_fetch = now;
+            }
+        }
+    }
+
     pub fn new(credentials: &[OAuthCredential]) -> Self {
         let (tx, rx) = mpsc::channel();
         let entries = credentials

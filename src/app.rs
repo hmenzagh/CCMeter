@@ -26,7 +26,7 @@ use crate::ui::time_filter::{TimeFilter, date_in_filter, filter_daily};
 // ---------------------------------------------------------------------------
 
 pub(crate) enum View {
-    Landing,
+    RateTracking,
     Main,
     Settings(Box<SettingsState>),
 }
@@ -109,7 +109,7 @@ pub(crate) struct App {
 
     pub(crate) render_dirty: bool,
     pub(crate) card_scroll: usize,
-    pub(crate) landing_selected: usize,
+    pub(crate) rate_tracking_selected: usize,
 
     pub(crate) reloading: bool,
     reload_tx: mpsc::Sender<ReloadResult>,
@@ -117,7 +117,6 @@ pub(crate) struct App {
 
     pub(crate) start_time: std::time::Instant,
     pub(crate) last_reload: std::time::Instant,
-    pub(crate) reload_interval: Duration,
 
     usage_poller: UsagePoller,
 }
@@ -162,6 +161,10 @@ impl App {
         let project_index: Option<usize> = None;
         let settings = Settings::load();
         let time_filter = settings.time_filter.unwrap_or(TimeFilter::All);
+        let initial_view = match settings.last_view.as_deref() {
+            Some("rate_tracking") => View::RateTracking,
+            _ => View::Main, // includes "main" and any unknown value
+        };
 
         let cwds_filter = project_cwds_static(&groups, project_index);
 
@@ -201,19 +204,18 @@ impl App {
                 source_roots,
             },
             render,
-            view: View::Landing,
+            view: initial_view,
             time_filter,
             source_index,
             project_index,
             render_dirty: false,
             card_scroll: 0,
-            landing_selected: 0,
+            rate_tracking_selected: 0,
             reloading: false,
             reload_tx,
             reload_rx,
             start_time: std::time::Instant::now(),
             last_reload: std::time::Instant::now(),
-            reload_interval: Duration::from_secs(5 * 60),
             usage_poller,
         };
         app.record_rate_history();
@@ -328,14 +330,28 @@ impl App {
         }
     }
 
+    fn switch_view(&mut self, view: View) {
+        let key = match &view {
+            View::RateTracking => "rate_tracking",
+            View::Main => "main",
+            View::Settings(_) => return,
+        };
+        self.view = view;
+        self.render_dirty = true;
+        self.config.settings.last_view = Some(key.to_string());
+        self.config.settings.save();
+    }
+
     pub(crate) fn handle_reload(&mut self) {
         // Poll usage API for each credential on its own random timer.
-        // When usage is updated, also trigger a JSONL reload so that
-        // token counts and utilization percentages stay consistent.
+        // A JSONL reload is triggered only after a successful usage poll.
         let usage_updated = self.usage_poller
             .poll(&mut self.data.oauth_credentials);
 
-        if (self.last_reload.elapsed() >= self.reload_interval || usage_updated) && !self.reloading {
+        if usage_updated
+            && !self.reloading
+            && self.last_reload.elapsed() >= Duration::from_millis(500)
+        {
             spawn_reload(
                 &self.config.raw_groups,
                 &self.config.session_map,
@@ -366,8 +382,8 @@ impl App {
             return false;
         }
 
-        // Tab/BackTab cycle time filters globally, except in Settings/Landing.
-        if !matches!(self.view, View::Settings(_) | View::Landing) {
+        // Tab/BackTab cycle time filters globally, except in Settings/RateTracking.
+        if !matches!(self.view, View::Settings(_) | View::RateTracking) {
             match key.code {
                 KeyCode::Tab => {
                     self.time_filter = self.time_filter.next();
@@ -388,23 +404,25 @@ impl App {
         }
 
         match &mut self.view {
-            View::Landing => match key.code {
+            View::RateTracking => match key.code {
                 KeyCode::Char('`') => {
-                    self.view = View::Main;
-                    self.render_dirty = true;
+                    self.switch_view(View::Main);
                 }
                 KeyCode::Char('q') => return false,
                 KeyCode::Right | KeyCode::Char('l') => {
                     let n = self.data.oauth_credentials.len();
                     if n > 0 {
-                        self.landing_selected = (self.landing_selected + 1) % n;
+                        self.rate_tracking_selected = (self.rate_tracking_selected + 1) % n;
                     }
                 }
                 KeyCode::Left | KeyCode::Char('h') => {
                     let n = self.data.oauth_credentials.len();
                     if n > 0 {
-                        self.landing_selected = (self.landing_selected + n - 1) % n;
+                        self.rate_tracking_selected = (self.rate_tracking_selected + n - 1) % n;
                     }
+                }
+                KeyCode::Char('r') if !self.reloading => {
+                    self.usage_poller.force_poll_all();
                 }
                 _ => {}
             },
@@ -415,14 +433,11 @@ impl App {
                     self.recompute_tokens();
                 }
                 KeyCode::Char('q') => return false,
+                KeyCode::Char('`') => {
+                    self.switch_view(View::RateTracking);
+                }
                 KeyCode::Char('r') if !self.reloading => {
-                    spawn_reload(
-                        &self.config.raw_groups,
-                        &self.config.session_map,
-                        &self.reload_tx,
-                    );
-                    self.reloading = true;
-                    self.last_reload = std::time::Instant::now();
+                    self.usage_poller.force_poll_all();
                 }
                 KeyCode::Char('.') => {
                     self.view = View::Settings(Box::new(SettingsState::new(&self.config.groups)));

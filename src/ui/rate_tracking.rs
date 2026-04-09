@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{Datelike, NaiveDate, TimeZone};
+use chrono::{Datelike, NaiveDate, TimeZone, Timelike};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
@@ -9,6 +9,7 @@ use crate::data::models::format_tokens;
 use crate::data::oauth::{OAuthCredential, UsageReport, UsageStats, UsageWindow};
 use crate::data::rate_history::RateHistory;
 use crate::data::rate_limits::RateLimitHit;
+use crate::data::tokens::MinuteTokens;
 
 use super::theme::theme;
 
@@ -147,6 +148,7 @@ pub(crate) fn render(
     selected: Option<usize>,
     index: &EventIndex,
     rate_history: &RateHistory,
+    reloading: bool,
     tick: usize,
 ) {
     let outer = Layout::default()
@@ -157,7 +159,7 @@ pub(crate) fn render(
     // Left: rate limits table (full height) | Right: cards (top) + chart (bottom)
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .constraints([Constraint::Length(34), Constraint::Min(40)])
         .split(outer[0]);
 
     // Filter rate limits by the selected credential's source_root
@@ -178,20 +180,32 @@ pub(crate) fn render(
 
     render_rate_limits(frame, columns[0], &filtered_hits, source_names, source_roots, &credential_roots);
 
-    // Right panel: cards (top) + chart (rest)
+    // Right panel: cards + KPIs + forecast + usage timeline + max usage chart
     let right_rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(count_card_height(credentials)), Constraint::Min(4)])
+        .constraints([
+            Constraint::Length(count_card_height(credentials)),
+            Constraint::Length(3),
+            Constraint::Length(5),
+            Constraint::Length(8),
+            Constraint::Min(4),
+        ])
         .split(columns[1]);
 
     render_credential_cards(frame, right_rows[0], credentials, source_names, source_roots, selected, &credential_roots);
 
     let selected_cred = selected.filter(|&i| i < credentials.len()).map(|i| &credentials[i]);
     let bars = compute_session_bars(&filtered_hits, index, selected_root.as_deref(), selected_cred, rate_history);
-    render_session_chart(frame, right_rows[1], &bars, tick);
+    render_kpi_bar(frame, right_rows[1], &bars, &filtered_hits);
+
+    let selected_minute_tokens = index.build_minute_tokens(selected_root.as_deref(), None);
+    render_session_forecast(frame, right_rows[2], selected_cred, &selected_minute_tokens, tick);
+    render_usage_timeline(frame, right_rows[3], &selected_minute_tokens, selected_cred, tick);
+
+    render_session_chart(frame, right_rows[4], &bars, tick);
 
     // Footer
-    render_footer(frame, outer[1]);
+    render_footer(frame, outer[1], reloading);
 }
 
 fn count_card_height(credentials: &[OAuthCredential]) -> u16 {
@@ -224,12 +238,120 @@ fn count_gauges(usage: Option<&UsageReport>) -> usize {
 // Credential cards (top-right, side by side)
 // ---------------------------------------------------------------------------
 
-fn render_footer(frame: &mut Frame, area: Rect) {
+fn render_footer(frame: &mut Frame, area: Rect, reloading: bool) {
     let t = theme();
-    let text = "←→ Select source   ` Dashboard   q Quit";
-    let footer = Paragraph::new(Span::styled(text, Style::default().fg(t.text_dim)))
-        .alignment(Alignment::Center);
-    frame.render_widget(footer, area);
+    if reloading {
+        let footer = Paragraph::new(Span::styled("⟳ Reloading…", Style::default().fg(t.warning)))
+            .alignment(Alignment::Center);
+        frame.render_widget(footer, area);
+    } else {
+        let text = "←→ Select source   r Reload   ` Dashboard   q Quit";
+        let footer = Paragraph::new(Span::styled(text, Style::default().fg(t.text_dim)))
+            .alignment(Alignment::Center);
+        frame.render_widget(footer, area);
+    }
+}
+
+fn render_kpi_bar(
+    frame: &mut Frame,
+    area: Rect,
+    bars: &[DayBar],
+    hits: &[&RateLimitHit],
+) {
+    let t = theme();
+
+    // KPI 1: Avg tokens/session (from history bars, excluding current)
+    let history_bars: Vec<&DayBar> = bars
+        .iter()
+        .filter(|b| b.kind != BarKind::Current && b.tokens > 0)
+        .collect();
+    let avg_tokens = if history_bars.is_empty() {
+        0u64
+    } else {
+        let sum: u64 = history_bars.iter().map(|b| b.tokens).sum();
+        sum / history_bars.len() as u64
+    };
+    let avg_str = format_tokens(avg_tokens);
+
+    // KPI 2: Trend % (linear regression slope as % change over the period)
+    let trend_str = if history_bars.len() >= 2 {
+        let n = history_bars.len() as f64;
+        let sum_x: f64 = (0..history_bars.len()).map(|i| i as f64).sum();
+        let sum_y: f64 = history_bars.iter().map(|b| b.tokens as f64).sum();
+        let sum_xy: f64 = history_bars
+            .iter()
+            .enumerate()
+            .map(|(i, b)| i as f64 * b.tokens as f64)
+            .sum();
+        let sum_x2: f64 = (0..history_bars.len()).map(|i| (i * i) as f64).sum();
+        let denom = n * sum_x2 - sum_x * sum_x;
+        if denom.abs() > 1e-9 {
+            let slope = (n * sum_xy - sum_x * sum_y) / denom;
+            let mean_y = sum_y / n;
+            if mean_y > 0.0 {
+                let pct = (slope / mean_y) * 100.0;
+                if pct >= 0.0 {
+                    format!("↑{:.0}%", pct)
+                } else {
+                    format!("↓{:.0}%", pct.abs())
+                }
+            } else {
+                "—".to_string()
+            }
+        } else {
+            "—".to_string()
+        }
+    } else {
+        "—".to_string()
+    };
+    let trend_color = if trend_str.starts_with('↑') {
+        Color::Rgb(80, 200, 80) // green — positive trend
+    } else if trend_str.starts_with('↓') {
+        Color::Rgb(220, 60, 60) // red — negative trend
+    } else {
+        t.text_dim
+    };
+
+    // KPI 3: Rate-limit hits (total count)
+    let hit_count = hits.len();
+    let hits_str = format!("{}", hit_count);
+    let hits_color = if hit_count == 0 {
+        Color::Rgb(80, 200, 80)
+    } else if hit_count <= 3 {
+        Color::Rgb(220, 200, 40)
+    } else {
+        Color::Rgb(220, 60, 60)
+    };
+
+    let values: [(&str, &str, Color); 3] = [
+        (&avg_str, " Avg tokens/session ", t.tokens_in),
+        (&trend_str, " Trend ", trend_color),
+        (&hits_str, " Rate-limit hits ", hits_color),
+    ];
+
+    let col_constraints: Vec<Constraint> = (0..3)
+        .map(|_| Constraint::Ratio(1, 3))
+        .collect();
+    let col_areas = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(col_constraints)
+        .split(area);
+
+    for (i, col_area) in col_areas.iter().enumerate() {
+        let (val, label, color) = &values[i];
+        let block = Block::default()
+            .title(Span::styled(*label, Style::default().fg(t.text_dim)))
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(t.border));
+        let paragraph = Paragraph::new(Span::styled(
+            *val,
+            Style::default().fg(*color).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Center)
+        .block(block);
+        frame.render_widget(paragraph, *col_area);
+    }
 }
 
 fn render_credential_cards(
@@ -651,17 +773,516 @@ fn compute_session_bars(
     bars
 }
 
-fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], tick: usize) {
+fn render_session_forecast(
+    frame: &mut Frame,
+    area: Rect,
+    selected_cred: Option<&OAuthCredential>,
+    minute_tokens: &MinuteTokens,
+    tick: usize,
+) {
     let t = theme();
     let (star, star_style) = super::theme::star_span(tick);
 
+    let title = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(star, star_style),
+        Span::styled(
+            " Session forecast ",
+            Style::default()
+                .fg(t.heatmap_title)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(t.border))
+        .title(title);
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 3 || inner.width < 20 {
+        return;
+    }
+
+    let cred = match selected_cred {
+        Some(c) => c,
+        None => {
+            let msg = Paragraph::new(Span::styled(
+                "no source selected",
+                Style::default().fg(t.text_dim),
+            ));
+            frame.render_widget(msg, inner);
+            return;
+        }
+    };
+
+    let usage = match &cred.usage {
+        Some(u) => u,
+        None => {
+            let msg = Paragraph::new(Span::styled(
+                "waiting for usage data…",
+                Style::default().fg(t.text_dim),
+            ));
+            frame.render_widget(msg, inner);
+            return;
+        }
+    };
+
+    let five_h = match &usage.five_hour {
+        Some(fh) => fh,
+        None => return,
+    };
+
+    let utilization = five_h.utilization / 100.0; // 0.0 .. 1.0
+
+    // Parse session timing
+    let now_local = chrono::Local::now();
+    let (session_start_local, session_end_local) =
+        if let Some(resets_at_str) = &five_h.resets_at
+            && let Ok(resets_at) = chrono::DateTime::parse_from_rfc3339(resets_at_str)
+        {
+            let end = resets_at.with_timezone(&chrono::Local);
+            let start = end - chrono::Duration::hours(5);
+            (start.naive_local(), end.naive_local())
+        } else {
+            // Fallback: assume 5h window ending 5h from now
+            let end = now_local.naive_local() + chrono::Duration::hours(5);
+            let start = now_local.naive_local();
+            (start, end)
+        };
+
+    let total_window_min = 300.0f64; // 5h in minutes
+    let elapsed_min = (now_local.naive_local() - session_start_local)
+        .num_seconds()
+        .max(0) as f64
+        / 60.0;
+    let remaining_min = (session_end_local - now_local.naive_local())
+        .num_seconds()
+        .max(0) as f64
+        / 60.0;
+
+    // Compute recent token rate (last 30 min or session duration, whichever is shorter)
+    let today = now_local.date_naive();
+    let now_minute = now_local.hour() as u16 * 60 + now_local.minute() as u16;
+    let sample_window = (elapsed_min as u16).min(30).max(1);
+    let sample_start = now_minute.saturating_sub(sample_window);
+
+    let mut recent_tokens: u64 = 0;
+    for (&(date, minute), &val) in minute_tokens.input.iter().chain(minute_tokens.output.iter()) {
+        if date == today && minute >= sample_start && minute <= now_minute {
+            recent_tokens += val;
+        } else if date == today.pred_opt().unwrap_or(today)
+            && sample_start > now_minute
+            && minute >= sample_start
+        {
+            recent_tokens += val;
+        }
+    }
+
+    let rate_per_min = if sample_window > 0 {
+        recent_tokens as f64 / sample_window as f64
+    } else {
+        0.0
+    };
+
+    // Estimate time to hit limit
+    // If utilization is U and we've been going for E minutes,
+    // the "safe" rate = (1.0 - U) / remaining_min (proportional)
+    // But we compare actual rate vs what would deplete the remaining budget.
+    // Remaining budget fraction = 1.0 - utilization
+    // At current rate_per_min, total_tokens_per_min = rate_per_min
+    // We need: rate over session → how much util per minute = utilization / elapsed_min
+    // Better: use rate ratio. If current rate continues, minutes until 100%:
+    let util_per_min = if elapsed_min > 1.0 {
+        utilization / elapsed_min
+    } else {
+        utilization
+    };
+
+    let minutes_to_limit = if util_per_min > 0.0 {
+        (1.0 - utilization) / util_per_min
+    } else {
+        f64::INFINITY
+    };
+
+    let limit_time = now_local + chrono::Duration::seconds((minutes_to_limit * 60.0) as i64);
+
+    // Determine status based on ratio of current rate vs safe rate
+    // Safe rate = rate that would exactly finish at the end of window
+    let safe_util_per_min = if remaining_min > 0.0 {
+        (1.0 - utilization) / remaining_min
+    } else {
+        0.0
+    };
+
+    let rate_ratio = if safe_util_per_min > 0.0 {
+        util_per_min / safe_util_per_min
+    } else if util_per_min > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+
+    let (status_label, status_color) = if rate_ratio < 0.70 {
+        ("Steady", Color::Rgb(80, 200, 80))
+    } else if rate_ratio < 0.85 {
+        ("Watch", Color::Rgb(220, 200, 40))
+    } else if rate_ratio < 0.95 {
+        ("Slow down", Color::Rgb(220, 140, 40))
+    } else {
+        ("Critical", Color::Rgb(220, 50, 50))
+    };
+
+    // Format rate
+    let rate_label = if rate_per_min >= 1000.0 {
+        format!("{:.1}K/m", rate_per_min / 1000.0)
+    } else {
+        format!("{:.0}/m", rate_per_min)
+    };
+
+    // Format time remaining
+    let time_remaining_label = if minutes_to_limit.is_infinite() || minutes_to_limit > 600.0 {
+        "—".to_string()
+    } else {
+        let h = minutes_to_limit as u64 / 60;
+        let m = minutes_to_limit as u64 % 60;
+        if h > 0 {
+            format!("{}h{:02}m", h, m)
+        } else {
+            format!("{}m", m)
+        }
+    };
+
+    let limit_time_label = if minutes_to_limit.is_infinite() || minutes_to_limit > 600.0 {
+        "—".to_string()
+    } else {
+        format!("{}", limit_time.format("%H:%M"))
+    };
+
+    // Row 0: progress bar
+    // Session start and end times on left/right, bar in between
+    let start_str = format!("{}", session_start_local.format("%H:%M"));
+    let end_str = format!("{}", session_end_local.format("%H:%M"));
+    let bar_width = inner.width.saturating_sub(start_str.len() as u16 + end_str.len() as u16 + 2) as usize;
+
+    let now_pos = (elapsed_min / total_window_min).clamp(0.0, 1.0);
+    let filled = (now_pos * bar_width as f64) as usize;
+
+    let mut bar_spans: Vec<Span> = Vec::new();
+    bar_spans.push(Span::styled(
+        format!("{} ", start_str),
+        Style::default().fg(t.text_dim),
+    ));
+    for i in 0..bar_width {
+        if i < filled {
+            bar_spans.push(Span::styled(
+                "█",
+                Style::default().fg(gradient_color(utilization)),
+            ));
+        } else {
+            bar_spans.push(Span::styled("░", Style::default().fg(t.empty_bar)));
+        }
+    }
+    bar_spans.push(Span::styled(
+        format!(" {}", end_str),
+        Style::default().fg(t.text_dim),
+    ));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(bar_spans)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    // Row 1: ↑now marker positioned under the bar
+    let marker_col = (start_str.len() + 1) + filled;
+    let marker_col = marker_col.min(inner.width as usize - 4);
+    let mut marker_spans: Vec<Span> = Vec::new();
+    if marker_col > 0 {
+        marker_spans.push(Span::raw(" ".repeat(marker_col)));
+    }
+    marker_spans.push(Span::styled("↑now", Style::default().fg(t.text_secondary)));
+    frame.render_widget(
+        Paragraph::new(Line::from(marker_spans)),
+        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+    );
+
+    // Row 2: status indicator + time remaining + rate
+    let mut status_spans: Vec<Span> = Vec::new();
+    // Blink the dot for critical status
+    let dot_visible = if rate_ratio >= 0.95 {
+        (tick / 3) % 2 == 0
+    } else {
+        true
+    };
+    if dot_visible {
+        status_spans.push(Span::styled("● ", Style::default().fg(status_color)));
+    } else {
+        status_spans.push(Span::raw("  "));
+    }
+    status_spans.push(Span::styled(
+        status_label,
+        Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+    ));
+    status_spans.push(Span::styled(
+        format!(" — {}", time_remaining_label),
+        Style::default().fg(t.text_primary),
+    ));
+
+    // Right-align: rate + limit time
+    let left_part = format!("● {} — {}", status_label, time_remaining_label);
+    let right_part = format!("{} → {}", rate_label, limit_time_label);
+    let padding = (inner.width as usize).saturating_sub(left_part.len() + right_part.len());
+    if padding > 0 {
+        status_spans.push(Span::raw(" ".repeat(padding)));
+    }
+    status_spans.push(Span::styled(
+        rate_label.clone(),
+        Style::default().fg(t.text_dim),
+    ));
+    status_spans.push(Span::styled(" → ", Style::default().fg(t.text_dim)));
+    status_spans.push(Span::styled(
+        limit_time_label,
+        Style::default().fg(status_color),
+    ));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(status_spans)),
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+    );
+}
+
+fn render_usage_timeline(
+    frame: &mut Frame,
+    area: Rect,
+    minute_tokens: &MinuteTokens,
+    selected_cred: Option<&OAuthCredential>,
+    _tick: usize,
+) {
+    let t = theme();
+    let dot_color = t.tokens_in;
+
+    let title = Line::from(vec![
+        Span::styled(
+            " Session tokens ",
+            Style::default()
+                .fg(t.heatmap_title)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(t.border))
+        .title(title);
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 2 || inner.width < 8 {
+        return;
+    }
+
+    // Determine session window from the selected credential's five_hour.resets_at
+    let now_local = chrono::Local::now();
+    let (session_date, start_minute, now_minute) = if let Some(cred) = selected_cred
+        && let Some(usage) = &cred.usage
+        && let Some(five_h) = &usage.five_hour
+        && let Some(resets_at_str) = &five_h.resets_at
+        && let Ok(resets_at) = chrono::DateTime::parse_from_rfc3339(resets_at_str)
+    {
+        let session_start = (resets_at.with_timezone(&chrono::Local) - chrono::Duration::hours(5))
+            .naive_local();
+        let date = session_start.date();
+        let sm = session_start.hour() as u16 * 60 + session_start.minute() as u16;
+        let nm = if date == now_local.date_naive() {
+            now_local.hour() as u16 * 60 + now_local.minute() as u16
+        } else {
+            // Session started yesterday — clamp to today
+            now_local.hour() as u16 * 60 + now_local.minute() as u16
+        };
+        (date, sm, nm)
+    } else {
+        // Fallback: last 4 hours
+        let nm = now_local.hour() as u16 * 60 + now_local.minute() as u16;
+        let sm = nm.saturating_sub(nm.min(240));
+        (now_local.date_naive(), sm, nm)
+    };
+
+    // Handle sessions that may span midnight
+    let today = now_local.date_naive();
+    let spans_midnight = session_date < today;
+    let total_minutes = if spans_midnight {
+        (1440 - start_minute) + now_minute
+    } else {
+        now_minute.saturating_sub(start_minute)
+    };
+
+    if total_minutes == 0 {
+        return;
+    }
+
+    let bucket_min: u16 = 2;
+    let n_buckets = ((total_minutes + bucket_min - 1) / bucket_min).max(1) as usize;
+
+    let mut buckets = vec![0u64; n_buckets];
+    for (&(date, minute), &val) in minute_tokens.input.iter().chain(minute_tokens.output.iter()) {
+        let offset = if spans_midnight {
+            if date == session_date && minute >= start_minute {
+                Some((minute - start_minute) as u32)
+            } else if date == today && minute <= now_minute {
+                Some((1440 - start_minute) as u32 + minute as u32)
+            } else {
+                None
+            }
+        } else {
+            if date == today && minute >= start_minute && minute <= now_minute {
+                Some((minute - start_minute) as u32)
+            } else {
+                None
+            }
+        };
+        if let Some(off) = offset {
+            let idx = (off / bucket_min as u32) as usize;
+            if idx < n_buckets {
+                buckets[idx] += val;
+            }
+        }
+    }
+
+    // Scale label (top-right)
+    let max_val = buckets.iter().cloned().max().unwrap_or(0).max(1);
+    let scale_label = format_tokens(max_val);
+    let scale_span = Span::styled(&scale_label, Style::default().fg(t.tokens_in));
+    let scale_area = Rect::new(
+        inner.x + inner.width.saturating_sub(scale_label.len() as u16),
+        inner.y,
+        scale_label.len() as u16,
+        1,
+    );
+    frame.render_widget(Paragraph::new(scale_span), scale_area);
+
+    let chart_h = inner.height.saturating_sub(1) as usize; // 1 row for x-axis
+    let chart_w = inner.width as usize;
+    if chart_w < 2 || chart_h < 1 {
+        return;
+    }
+
+    // Always resample to exactly fill the available width (dot-columns = chart_w * 2)
+    let dot_cols = chart_w * 2;
+    let dot_rows = chart_h * 4;
+
+    let data: Vec<f64> = {
+        let ratio = n_buckets as f64 / dot_cols as f64;
+        (0..dot_cols)
+            .map(|i| {
+                let center = (i as f64 + 0.5) * ratio;
+                let lo = (center - ratio / 2.0).max(0.0).floor() as usize;
+                let hi = (center + ratio / 2.0).ceil() as usize;
+                let hi = hi.min(n_buckets);
+                if lo >= hi {
+                    let idx = center.round() as usize;
+                    if idx < n_buckets { buckets[idx] as f64 } else { 0.0 }
+                } else {
+                    let sum: u64 = buckets[lo..hi].iter().sum();
+                    sum as f64 / (hi - lo) as f64
+                }
+            })
+            .collect()
+    };
+    let n_points = data.len();
+    let max_f = max_val as f64;
+
+    // Braille line rendering — interpolate between consecutive points so the
+    // curve is continuous, just like the dashboard sparkline.
+    const DOT_BITS: [u8; 8] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
+    let mut braille_map: std::collections::HashMap<(u16, u16), u8> =
+        std::collections::HashMap::new();
+
+    let set_dot = |map: &mut std::collections::HashMap<(u16, u16), u8>, dx: usize, dy: usize| {
+        let cell_x = dx / 2;
+        let cell_y = dy / 4;
+        let sub_x = dx % 2;
+        let sub_y = dy % 4;
+        let bit_idx = match (sub_x, sub_y) {
+            (0, r @ 0..=2) => r,
+            (0, 3) => 6,
+            (1, r @ 0..=2) => r + 3,
+            (1, 3) => 7,
+            _ => unreachable!(),
+        };
+        let cx = inner.x + cell_x as u16;
+        let cy = inner.y + cell_y as u16;
+        if cx < inner.x + inner.width && cy < inner.y + chart_h as u16 {
+            *map.entry((cx, cy)).or_default() |= DOT_BITS[bit_idx];
+        }
+    };
+
+    // Convert data values to dot-row positions
+    let y_positions: Vec<usize> = data
+        .iter()
+        .map(|&v| {
+            let ratio = v / max_f;
+            ((1.0 - ratio) * (dot_rows - 1) as f64).round() as usize
+        })
+        .collect();
+
+    for dx in 0..n_points {
+        let dy = y_positions[dx];
+        set_dot(&mut braille_map, dx, dy);
+
+        // Interpolate vertically between this point and the next
+        if dx + 1 < n_points {
+            let dy_next = y_positions[dx + 1];
+            let (lo, hi) = if dy < dy_next { (dy, dy_next) } else { (dy_next, dy) };
+            for y in lo..=hi {
+                set_dot(&mut braille_map, dx, y);
+            }
+        }
+    }
+
+    let buf = frame.buffer_mut();
+    for ((cx, cy), bits) in &braille_map {
+        let ch = char::from_u32(0x2800 + *bits as u32).unwrap_or('·');
+        let cell = &mut buf[(*cx, *cy)];
+        cell.set_char(ch);
+        cell.set_fg(dot_color);
+    }
+
+    // X-axis: time labels
+    let x_row = inner.y + inner.height - 1;
+    let label_count = (chart_w / 12).max(2);
+    for li in 0..label_count {
+        let col = if label_count > 1 {
+            li * (chart_w - 1) / (label_count - 1)
+        } else {
+            0
+        };
+        let offset_min = (col as f64 / chart_w as f64 * total_minutes as f64) as u16;
+        let abs_minute = (start_minute + offset_min) % 1440;
+        let label = format!("{:02}:{:02}", abs_minute / 60, abs_minute % 60);
+        let lx = inner.x + col as u16;
+        for (ci, ch) in label.chars().enumerate() {
+            let x = lx + ci as u16;
+            if x < inner.x + inner.width && x_row < inner.y + inner.height {
+                let cell = &mut buf[(x, x_row)];
+                cell.set_char(ch);
+                cell.set_fg(t.text_dim);
+            }
+        }
+    }
+}
+
+fn render_session_chart(frame: &mut Frame, area: Rect, bars: &[DayBar], _tick: usize) {
+    let t = theme();
     let red = Color::Rgb(220, 60, 60);
     let blue = Color::Rgb(80, 170, 240);
     let violet = Color::Rgb(160, 100, 220);
 
     let title = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(star, star_style),
         Span::styled(" Max usage graph ", Style::default().fg(t.heatmap_title).add_modifier(Modifier::BOLD)),
         Span::styled("██", Style::default().fg(violet)),
         Span::styled(" history ", Style::default().fg(t.text_dim)),
