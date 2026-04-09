@@ -313,6 +313,15 @@ impl App {
             let resets_utc = resets_at.with_timezone(&chrono::Utc);
             let session_start_utc = resets_utc - chrono::Duration::hours(5);
             let now_utc = chrono::Utc::now();
+
+            // Skip recording when the session is too young (< 30 min):
+            // the estimate is unstable because local tokens and API
+            // utilization don't update at the same rate.
+            let elapsed_min = (now_utc - session_start_utc).num_seconds().max(0) as f64 / 60.0;
+            if elapsed_min < 30.0 || utilization < 2.0 {
+                continue;
+            }
+
             let start_local = session_start_utc
                 .with_timezone(&chrono::Local)
                 .naive_local();

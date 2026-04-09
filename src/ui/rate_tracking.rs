@@ -745,24 +745,33 @@ fn compute_session_bars(
                     let resets_utc = resets_at.with_timezone(&chrono::Utc);
                     let session_start_utc = resets_utc - chrono::Duration::hours(5);
                     let now_utc = chrono::Utc::now();
-                    let start_local = session_start_utc
-                        .with_timezone(&chrono::Local)
-                        .naive_local();
-                    let end_local = now_utc
-                        .with_timezone(&chrono::Local)
-                        .naive_local();
-                    let tokens = index.tokens_in_window(root, start_local, end_local);
+
+                    // Skip the live bar when the session is too young
+                    // (< 30 min) or utilization too low: the ratio
+                    // tokens / utilization is unstable early on.
+                    let elapsed_min =
+                        (now_utc - session_start_utc).num_seconds().max(0) as f64 / 60.0;
                     let utilization = five_h.utilization;
-                    if tokens > 0 && utilization > 0.0 {
-                        let estimated_tokens =
-                            (tokens as f64 / (utilization / 100.0)).round() as u64;
-                        if estimated_tokens > 0 {
-                            let today = chrono::Local::now().date_naive();
-                            bars.push(DayBar {
-                                date: today,
-                                tokens: estimated_tokens,
-                                kind: BarKind::Current,
-                            });
+
+                    if elapsed_min >= 30.0 && utilization >= 2.0 {
+                        let start_local = session_start_utc
+                            .with_timezone(&chrono::Local)
+                            .naive_local();
+                        let end_local = now_utc
+                            .with_timezone(&chrono::Local)
+                            .naive_local();
+                        let tokens = index.tokens_in_window(root, start_local, end_local);
+                        if tokens > 0 {
+                            let estimated_tokens =
+                                (tokens as f64 / (utilization / 100.0)).round() as u64;
+                            if estimated_tokens > 0 {
+                                let today = chrono::Local::now().date_naive();
+                                bars.push(DayBar {
+                                    date: today,
+                                    tokens: estimated_tokens,
+                                    kind: BarKind::Current,
+                                });
+                            }
                         }
                     }
                 }
@@ -908,7 +917,11 @@ fn render_session_forecast(
         f64::INFINITY
     };
 
-    let limit_time = now_local + chrono::Duration::seconds((minutes_to_limit * 60.0) as i64);
+    let limit_time = if minutes_to_limit.is_finite() {
+        now_local + chrono::Duration::seconds((minutes_to_limit * 60.0) as i64)
+    } else {
+        now_local
+    };
 
     // Determine status based on ratio of current rate vs safe rate
     // Safe rate = rate that would exactly finish at the end of window
@@ -927,13 +940,13 @@ fn render_session_forecast(
     };
 
     let (status_label, status_color) = if rate_ratio < 0.70 {
-        ("Steady", Color::Rgb(80, 200, 80))
+        ("Steady", t.lines_positive)
     } else if rate_ratio < 0.85 {
-        ("Watch", Color::Rgb(220, 200, 40))
+        ("Watch", t.warning)
     } else if rate_ratio < 0.95 {
-        ("Slow down", Color::Rgb(220, 140, 40))
+        ("Slow down", t.efficiency_accent)
     } else {
-        ("Critical", Color::Rgb(220, 50, 50))
+        ("Critical", t.error)
     };
 
     // Format rate
@@ -1152,6 +1165,13 @@ fn render_usage_timeline(
             }
         }
     }
+
+    // Trim trailing empty buckets so the graph only extends to the last
+    // data point rather than advancing with wall-clock time.
+    let last_nonzero = buckets.iter().rposition(|&v| v > 0).unwrap_or(0);
+    let n_buckets = last_nonzero + 1;
+    let buckets = &buckets[..n_buckets];
+    let total_minutes = (n_buckets as u16) * bucket_min;
 
     // Scale label (top-right)
     let max_val = buckets.iter().cloned().max().unwrap_or(0).max(1);
