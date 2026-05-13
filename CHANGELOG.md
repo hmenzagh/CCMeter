@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Cost accuracy on Bedrock and unrecognized models** — `model_pricing` previously matched dash-form patterns only (`opus-4-6`), so Bedrock-proxy model strings (`aws.claude-opus-4.7`, dot form) and the missing `opus-4-7` entry both fell through to a Sonnet-only fallback. Net effect on a real proxy archive: every Opus 4.6 / 4.7 call billed at ~3/5 of the correct rate, every Haiku 4.5 call billed at 3× — total cost under-counted ~56 %. Pricing now normalizes dots to dashes before lookup, includes Opus 4.7, and falls back per family (Opus / Sonnet / Haiku) when the version is unknown so future model releases don't silently route to Sonnet rates.
+
+### Changed
+- **Cache schema bumped to v3** so the pricing fix above propagates without manual intervention. Existing v2 caches froze the under-counted cost values; v3 forces a clean rebuild via the existing "Cache rebuilt" banner.
+
 ## [2.0.0] - 2026-04-13
 
 ### Added

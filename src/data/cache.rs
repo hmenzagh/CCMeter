@@ -46,7 +46,14 @@ pub struct DayEntry {
 ///   sub-agent activity (parent + sub-agent JSONLs both logged the same
 ///   `req_…`), so the high-water-mark merge would freeze the inflated
 ///   values in place.
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+/// - v3: `model_pricing` now normalizes Bedrock-style dot model names to
+///   dash form, adds the missing `opus-4-7` entry, and falls back per
+///   family (opus/sonnet/haiku) instead of always Sonnet. Existing v2
+///   caches were populated under the old logic which billed every Bedrock
+///   `aws.claude-opus-4.X` and direct-API `claude-opus-4-7` event at
+///   Sonnet rates — observed under-count on a real proxy archive: ~56 %
+///   of total cost. Bump forces a clean rebuild.
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Full cache: source_root -> cwd -> date (YYYY-MM-DD) -> metrics.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
