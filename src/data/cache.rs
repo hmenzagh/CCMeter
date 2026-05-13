@@ -46,7 +46,12 @@ pub struct DayEntry {
 ///   sub-agent activity (parent + sub-agent JSONLs both logged the same
 ///   `req_…`), so the high-water-mark merge would freeze the inflated
 ///   values in place.
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+/// - v3: `parse_session_files` now also falls back to `message.id` when
+///   `requestId` is absent (proxied API calls — corporate Bedrock gateways
+///   strip the request header). Pre-fix caches built under v2 inflated
+///   tokens/cost ~2.6× for proxy users because every streaming chunk got
+///   counted separately; bump forces a clean rebuild.
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Full cache: source_root -> cwd -> date (YYYY-MM-DD) -> metrics.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
