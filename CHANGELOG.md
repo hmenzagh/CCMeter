@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Token & cost accuracy on proxied API calls** — when Claude Code is pointed at a corporate Bedrock gateway or any third-party LLM proxy that strips the `requestId` request header, CCMeter previously fell back to a `line_uuid`-based dedup that never fires (each JSONL line carries a unique `uuid`), so a streaming response with N content-block lines got summed N times. Observed inflation on a real proxy user: **~2.6× across 28k events / 511 sessions**. Parser now uses `message.id` (`msg_…`) as the canonical dedup key when `requestId` is absent — both id-spaces are globally unique per Anthropic API call, so this restores the deltaize-by-canonical-stream guarantee for proxy users. Direct-API users (where `requestId` is present) are unaffected.
+
 ## [2.0.0] - 2026-04-13
 
 ### Added
