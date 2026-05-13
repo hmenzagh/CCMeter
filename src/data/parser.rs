@@ -31,11 +31,14 @@ pub struct Event {
     pub lines_deleted: u64,
     /// Basename of the JSONL file (session UUID).
     pub session_file: String,
-    /// API request id (`req_…`) — the canonical identifier Anthropic bills
-    /// against. Used to dedup events that get rewritten across files (e.g.
-    /// sub-agents echoing the parent's messages, auto-compact retries) or
-    /// across streaming chunks within the same file. `None` for user-side
-    /// events (`lines_accepted`, etc).
+    /// Canonical dedup key for assistant events. Prefers Anthropic's API
+    /// request id (`req_…`); falls back to `message.id` (`msg_…`) when the
+    /// JSONL omits `requestId` — the case for proxied API calls (corporate
+    /// Bedrock gateways, third-party LLM proxies) that strip request
+    /// headers. Both id-spaces are globally unique, so either works for
+    /// deduping events rewritten across files (sub-agent mirrors,
+    /// auto-compact retries) or across streaming chunks within one file.
+    /// `None` for user-side events (`lines_accepted`, etc).
     pub request_id: Option<String>,
     /// Raw `costUSD` read verbatim from the JSONL (the authoritative billed
     /// amount, cumulative per streaming snapshot when emitted by Claude
@@ -74,6 +77,10 @@ struct RawLine {
 
 #[derive(Deserialize)]
 struct RawMessage {
+    /// Anthropic message id (`msg_…`). Globally unique per API call, stable
+    /// across the streaming content-block lines Claude Code writes for one
+    /// response. Used as the dedup-key fallback when `requestId` is absent.
+    id: Option<String>,
     model: Option<String>,
     usage: Option<RawUsage>,
     content: Option<Vec<RawContentBlock>>,
@@ -449,7 +456,15 @@ fn parse_line(line: &str, session_file: &str) -> Option<Event> {
             let msg = raw.message?;
             let usage = msg.usage?;
 
-            let request_id = raw.request_id;
+            // Prefer Anthropic's `requestId` (`req_…`); fall back to
+            // `message.id` (`msg_…`) when absent. Proxied gateways (corporate
+            // Bedrock proxies, third-party LLM relays) often strip the
+            // request header but preserve the message id. Without this
+            // fallback, every chunk lands in `without_req` and the
+            // line-uuid dedup never fires (each chunk has a unique uuid),
+            // so streaming responses with N content-block lines get summed
+            // N times — observed inflation: 2–3× on proxy users.
+            let request_id = raw.request_id.or_else(|| msg.id.clone());
             let line_uuid = raw.uuid.clone();
             let model = msg.model.unwrap_or_default();
             let input_tokens = usage.input_tokens.unwrap_or(0);
@@ -1467,5 +1482,86 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|e| e.request_id.is_none()));
+    }
+
+    // ------------------------------------------------------------------
+    // message.id fallback when requestId is absent
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dedups_assistant_chunks_by_message_id_when_request_id_absent() {
+        // Proxied API calls (corporate Bedrock gateways, third-party LLM
+        // relays) often strip `requestId` from the JSONL but preserve
+        // `message.id`. Modern Claude Code writes the same final usage
+        // snapshot on every content-block line — without a fallback dedup
+        // key, two chunks would be summed and totals would inflate 2×.
+        let dir = tmp_dir("msgid_fallback_same_file");
+        let c1 = r#"{"type":"assistant","timestamp":"2026-04-01T12:00:00.100Z","uuid":"u-1","message":{"id":"msg_abc","model":"claude-opus-4-6","content":[{"type":"thinking"}],"usage":{"input_tokens":3,"output_tokens":200,"cache_read_input_tokens":1000,"cache_creation_input_tokens":0}}}"#;
+        let c2 = r#"{"type":"assistant","timestamp":"2026-04-01T12:00:00.200Z","uuid":"u-2","message":{"id":"msg_abc","model":"claude-opus-4-6","content":[{"type":"text"}],"usage":{"input_tokens":3,"output_tokens":200,"cache_read_input_tokens":1000,"cache_creation_input_tokens":0}}}"#;
+        let path = write_file(&dir, "s.jsonl", &[c1, c2]);
+
+        let events = parse_session_files(&[path]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Sum must equal ONE snapshot, not two.
+        let sum_in: u64 = events.iter().map(|e| e.input_tokens).sum();
+        let sum_out: u64 = events.iter().map(|e| e.output_tokens).sum();
+        let sum_cr: u64 = events.iter().map(|e| e.cache_read_input_tokens).sum();
+        assert_eq!(sum_in, 3, "must not double-count identical input snapshot");
+        assert_eq!(sum_out, 200, "must not double-count identical output snapshot");
+        assert_eq!(sum_cr, 1000, "must not double-count identical cache_read snapshot");
+    }
+
+    #[test]
+    fn mirror_dedup_uses_message_id_when_request_id_absent() {
+        // Same flow as `deltaized_tokens_sum_to_final_snapshot_across_streams`
+        // but stripped of `requestId` — this is the Bedrock-proxy case.
+        // Three cumulative chunks per file × two mirror files. Totals must
+        // still equal ONE final snapshot.
+        let dir = tmp_dir("msgid_fallback_mirror");
+        let mk = |ts: &str, out: u64, uid: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{ts}","uuid":"{uid}","message":{{"id":"msg_xyz","model":"claude-opus-4-6","usage":{{"input_tokens":3,"output_tokens":{out},"cache_read_input_tokens":500,"cache_creation_input_tokens":0}}}}}}"#
+            )
+        };
+        let p1 = mk("2026-04-01T12:00:00.100Z", 10, "u1");
+        let p2 = mk("2026-04-01T12:00:00.200Z", 50, "u2");
+        let p3 = mk("2026-04-01T12:00:00.300Z", 120, "u3");
+        let parent = write_file(&dir, "parent.jsonl", &[&p1, &p2, &p3]);
+        let agent = write_file(&dir, "agent-echo.jsonl", &[&p1, &p2, &p3]);
+
+        let events = parse_session_files(&[parent, agent]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let sum_in: u64 = events.iter().map(|e| e.input_tokens).sum();
+        let sum_out: u64 = events.iter().map(|e| e.output_tokens).sum();
+        let sum_cr: u64 = events.iter().map(|e| e.cache_read_input_tokens).sum();
+        assert_eq!(sum_in, 3, "sum(input) must equal final input_tokens, not 6× chunks");
+        assert_eq!(sum_out, 120, "sum(output) must equal final output_tokens");
+        assert_eq!(sum_cr, 500, "sum(cache_read) must equal final cache_read");
+    }
+
+    #[test]
+    fn prefers_request_id_over_message_id_when_both_present() {
+        // When both ids are present, requestId still wins. Two chunks share
+        // the same requestId but differ on message.id (synthetic edge case;
+        // proves the precedence). Should dedup as ONE group.
+        let dir = tmp_dir("msgid_precedence");
+        let c1 = r#"{"type":"assistant","timestamp":"2026-04-01T12:00:00.100Z","requestId":"req_same","uuid":"u-1","message":{"id":"msg_a","model":"claude-opus-4-6","usage":{"input_tokens":3,"output_tokens":50,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}}"#;
+        let c2 = r#"{"type":"assistant","timestamp":"2026-04-01T12:00:00.200Z","requestId":"req_same","uuid":"u-2","message":{"id":"msg_b","model":"claude-opus-4-6","usage":{"input_tokens":3,"output_tokens":120,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}}"#;
+        let path = write_file(&dir, "s.jsonl", &[c1, c2]);
+
+        let events = parse_session_files(&[path]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Both chunks share requestId, so deltaize collapses them.
+        // Sum of deltaized output = max snapshot = 120, not 50+120=170.
+        let sum_out: u64 = events.iter().map(|e| e.output_tokens).sum();
+        assert_eq!(sum_out, 120, "requestId grouping wins over message.id");
+        assert_eq!(
+            events[0].request_id.as_deref(),
+            Some("req_same"),
+            "request_id field carries the explicit requestId, not message.id"
+        );
     }
 }
